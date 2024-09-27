@@ -6,12 +6,11 @@ use solana_program::pubkey::Pubkey;
 #[cfg(not(feature = "no-entrypoint"))]
 pub mod entrypoint;
 
-pub mod account_map;
 pub mod accounts;
 pub mod balance;
 pub mod error;
 pub mod instruction;
-pub(crate) mod logic;
+pub mod logic;
 pub mod metrics;
 pub(crate) mod process_management;
 pub mod processor;
@@ -20,6 +19,7 @@ pub mod state;
 pub mod token;
 pub mod util;
 
+pub mod big_vec;
 pub mod vote_state;
 
 /// Seed for reserve account that holds SOL.
@@ -47,7 +47,7 @@ pub fn find_authority_program_address(
     Pubkey::find_program_address(&[&lido_address.to_bytes(), authority], program_id)
 }
 
-/// The minimum amount to put in a stake account (1 SOL).
+/// The minimum amount to put in a stake account (1 SOL + rent_exempt).
 ///
 /// For stake accounts, there is a minimum balance for the account to be
 /// rent-exempt, that depends on the size of the stake program's stake state
@@ -58,7 +58,8 @@ pub fn find_authority_program_address(
 /// need to be able to merge stake accounts, we also need to make sure that they
 /// contain enough stake that they will earn at least one lamport per epoch.
 /// 1 SOL should be sufficient for that.
-pub const MINIMUM_STAKE_ACCOUNT_BALANCE: token::Lamports = token::Lamports(1_000_000_000);
+/// https://github.com/solana-labs/solana/issues/24357#issuecomment-1225776709
+pub const MINIMUM_STAKE_ACCOUNT_BALANCE: token::Lamports = token::Lamports(1_002_282_880);
 
 /// The maximum number of unstake accounts that a validator can have simultaneously.
 pub const MAXIMUM_UNSTAKE_ACCOUNTS: u64 = 3;

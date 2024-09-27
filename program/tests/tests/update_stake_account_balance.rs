@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0
 
 use lido::error::LidoError;
+use lido::state::StakeDeposit;
 use lido::token::Lamports;
+use lido::MINIMUM_STAKE_ACCOUNT_BALANCE;
 use solana_program_test::tokio;
 use testlib::assert_solido_error;
-use testlib::solido_context::{Context, StakeDeposit};
+use testlib::solido_context::Context;
 
 #[tokio::test]
 async fn test_update_stake_account_balance() {
@@ -24,7 +26,7 @@ async fn test_update_stake_account_balance() {
     assert_eq!(solido_before, solido_after);
 
     // Deposit and stake the deposit with the validator. This creates one stake account.
-    let initial_amount = Lamports(1_000_000_000);
+    let initial_amount = MINIMUM_STAKE_ACCOUNT_BALANCE;
     context.deposit(initial_amount).await;
     let stake_account = context
         .stake_deposit(validator.vote_account, StakeDeposit::Append, initial_amount)
@@ -95,7 +97,7 @@ async fn test_update_stake_account_balance() {
     let solido_before = context.get_solido().await;
     let validator_before = solido_before
         .validators
-        .get(&validator.vote_account)
+        .find(&validator.vote_account)
         .unwrap();
 
     let account = context.get_account(validator.vote_account).await;
@@ -129,11 +131,11 @@ async fn test_update_stake_account_balance() {
     let solido_after = context.get_solido().await;
     let validator_after = solido_after
         .validators
-        .get(&validator.vote_account)
+        .find(&validator.vote_account)
         .unwrap();
 
-    let rewards = (validator_after.entry.stake_accounts_balance
-        - validator_before.entry.stake_accounts_balance)
+    let rewards = (validator_after.stake_accounts_balance
+        - validator_before.stake_accounts_balance)
         .expect("Does not underflow, because we received rewards.");
     assert_eq!(rewards, Lamports(arbitrary_rewards));
 
@@ -148,6 +150,7 @@ async fn test_update_stake_account_balance() {
     // to 3% of the rewards. Three lamports differ due to rounding errors.
     let treasury_fee = (treasury_after - treasury_before).unwrap();
     let treasury_fee_sol = solido_after
+        .lido
         .exchange_rate
         .exchange_st_sol(treasury_fee)
         .unwrap();
@@ -157,6 +160,7 @@ async fn test_update_stake_account_balance() {
     // to 2% of the rewards. Two lamport differ due to rounding errors.
     let developer_fee = (developer_after - developer_before).unwrap();
     let developer_fee_sol = solido_after
+        .lido
         .exchange_rate
         .exchange_st_sol(developer_fee)
         .unwrap();

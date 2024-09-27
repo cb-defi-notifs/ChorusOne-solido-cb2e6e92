@@ -12,12 +12,13 @@ use solana_sdk::transport;
 
 use lido::{
     error::LidoError,
+    state::StakeDeposit,
     token::{Lamports, StLamports},
     MINIMUM_STAKE_ACCOUNT_BALANCE,
 };
 use testlib::{
     assert_solido_error,
-    solido_context::{send_transaction, Context, StakeDeposit},
+    solido_context::{send_transaction, Context},
 };
 
 /// Shared context for tests where a given amount has been deposited and staked.
@@ -86,6 +87,18 @@ async fn test_withdraw_less_than_rent_fails() {
 }
 
 #[tokio::test]
+async fn test_withdraw_from_inactive_validator() {
+    let mut context = WithdrawContext::new((MINIMUM_STAKE_ACCOUNT_BALANCE * 2).unwrap()).await;
+
+    let validator = context.context.validator.as_ref().unwrap();
+    let vote_account = validator.vote_account.clone();
+    context.context.deactivate_validator(vote_account).await;
+
+    let result = context.try_withdraw(StLamports(MINIMUM_STAKE_ACCOUNT_BALANCE.0 - 1));
+    assert!(result.await.is_ok());
+}
+
+#[tokio::test]
 async fn test_withdraw_beyond_min_balance_fails() {
     let mut context = WithdrawContext::new((MINIMUM_STAKE_ACCOUNT_BALANCE * 2).unwrap()).await;
 
@@ -146,7 +159,7 @@ async fn test_withdrawal_result() {
     let split_stake_account = context.try_withdraw(test_withdraw_amount).await.unwrap();
 
     let split_stake_sol_balance = context.context.get_sol_balance(split_stake_account).await;
-    let solido = context.context.get_solido().await;
+    let solido = context.context.get_solido().await.lido;
     let amount_lamports = solido
         .exchange_rate
         .exchange_st_sol(test_withdraw_amount)
@@ -169,7 +182,7 @@ async fn test_withdrawal_result() {
     assert_eq!(stake_account_balance_after, Lamports(99_997_717_119));
 
     // Test if we updated the metrics
-    let solido_after = context.context.get_solido().await;
+    let solido_after = context.context.get_solido().await.lido;
     assert_eq!(
         solido_after.metrics.withdraw_amount.total_st_sol_amount,
         test_withdraw_amount

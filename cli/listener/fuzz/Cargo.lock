@@ -56,7 +56,7 @@ checksum = "250f629c0161ad8107cf89319e990051fae62832fd343083bea452d93e2205fd"
 [[package]]
 name = "anchor-attribute-access-control"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "anyhow",
@@ -69,7 +69,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-account"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "anyhow",
@@ -81,7 +81,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-error"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "proc-macro2 1.0.39",
@@ -92,7 +92,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-event"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "anyhow",
@@ -104,7 +104,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-interface"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "anyhow",
@@ -117,7 +117,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-program"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "anyhow",
@@ -129,7 +129,7 @@ dependencies = [
 [[package]]
 name = "anchor-attribute-state"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "anyhow",
@@ -141,7 +141,7 @@ dependencies = [
 [[package]]
 name = "anchor-derive-accounts"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-syn",
  "anyhow",
@@ -153,7 +153,7 @@ dependencies = [
 [[package]]
 name = "anchor-lang"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anchor-attribute-access-control",
  "anchor-attribute-account",
@@ -164,7 +164,7 @@ dependencies = [
  "anchor-attribute-state",
  "anchor-derive-accounts",
  "base64 0.13.0",
- "borsh 0.9.3",
+ "borsh",
  "bytemuck",
  "solana-program",
  "thiserror",
@@ -173,7 +173,7 @@ dependencies = [
 [[package]]
 name = "anchor-syn"
 version = "0.13.0"
-source = "git+https://github.com/lidofinance/anchor?branch=solana-v1.9.28#6722b88a13f33ce072fcdab00bdad4a42b2c3ac5"
+source = "git+https://github.com/lidofinance/anchor-lang#03fe7d7dec0a8f7c126e151c8bf4bd99229277bb"
 dependencies = [
  "anyhow",
  "bs58 0.3.1",
@@ -186,21 +186,6 @@ dependencies = [
  "sha2",
  "syn 1.0.96",
  "thiserror",
-]
-
-[[package]]
-name = "anker"
-version = "1.3.3"
-dependencies = [
- "bech32",
- "borsh 0.9.3",
- "lido",
- "num-derive",
- "num-traits",
- "serde",
- "solana-program",
- "spl-token",
- "spl-token-swap",
 ]
 
 [[package]]
@@ -302,12 +287,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
 
 [[package]]
-name = "bech32"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
-
-[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -363,46 +342,12 @@ checksum = "8d696c370c750c948ada61c69a0ee2cbbb9c50b1019ddb86d9317157a99c2cae"
 
 [[package]]
 name = "borsh"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b42b13fa9bf62be34702e5ee4526aff22530ae22fe34a0c4290d30d5e4e782e6"
-dependencies = [
- "borsh-derive 0.7.2",
-]
-
-[[package]]
-name = "borsh"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15bf3650200d8bffa99015595e10f1fbd17de07abbc25bb067da79e769939bfa"
 dependencies = [
- "borsh-derive 0.9.3",
+ "borsh-derive",
  "hashbrown",
-]
-
-[[package]]
-name = "borsh-derive"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6aaa45f8eec26e4bf71e7e5492cf53a91591af8f871f422d550e7cc43f6b927"
-dependencies = [
- "borsh-derive-internal 0.7.2",
- "borsh-schema-derive-internal 0.7.2",
- "proc-macro2 1.0.39",
- "syn 1.0.96",
-]
-
-[[package]]
-name = "borsh-derive"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "307f3740906bac2c118a8122fe22681232b244f1369273e45f1156b45c43d2dd"
-dependencies = [
- "borsh-derive-internal 0.8.2",
- "borsh-schema-derive-internal 0.8.2",
- "proc-macro-crate 0.1.5",
- "proc-macro2 1.0.39",
- "syn 1.0.96",
 ]
 
 [[package]]
@@ -411,32 +356,10 @@ version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6441c552f230375d18e3cc377677914d2ca2b0d36e52129fe15450a2dce46775"
 dependencies = [
- "borsh-derive-internal 0.9.3",
- "borsh-schema-derive-internal 0.9.3",
+ "borsh-derive-internal",
+ "borsh-schema-derive-internal",
  "proc-macro-crate 0.1.5",
  "proc-macro2 1.0.39",
- "syn 1.0.96",
-]
-
-[[package]]
-name = "borsh-derive-internal"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61621b9d3cca65cc54e2583db84ef912d59ae60d2f04ba61bc0d7fc57556bda2"
-dependencies = [
- "proc-macro2 1.0.39",
- "quote 1.0.18",
- "syn 1.0.96",
-]
-
-[[package]]
-name = "borsh-derive-internal"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2104c73179359431cc98e016998f2f23bc7a05bc53e79741bcba705f30047bc"
-dependencies = [
- "proc-macro2 1.0.39",
- "quote 1.0.18",
  "syn 1.0.96",
 ]
 
@@ -445,28 +368,6 @@ name = "borsh-derive-internal"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5449c28a7b352f2d1e592a8a28bf139bc71afb0764a14f3c02500935d8c44065"
-dependencies = [
- "proc-macro2 1.0.39",
- "quote 1.0.18",
- "syn 1.0.96",
-]
-
-[[package]]
-name = "borsh-schema-derive-internal"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85b38abfda570837b0949c2c7ebd31417e15607861c23eacb2f668c69f6f3bf7"
-dependencies = [
- "proc-macro2 1.0.39",
- "quote 1.0.18",
- "syn 1.0.96",
-]
-
-[[package]]
-name = "borsh-schema-derive-internal"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae29eb8418fcd46f723f8691a2ac06857d31179d33d2f2d91eb13967de97c728"
 dependencies = [
  "proc-macro2 1.0.39",
  "quote 1.0.18",
@@ -498,9 +399,9 @@ checksum = "771fe0050b883fcc3ea2359b1a96bcfbc090b7116eae7c3c512c7a083fdf23d3"
 
 [[package]]
 name = "bumpalo"
-version = "3.10.0"
+version = "3.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37ccbd214614c6783386c1af30caf03192f17891059cecc394b4fb119e363de3"
+checksum = "0d261e256854913907f67ed06efbc3338dfe6179796deefc1ff763fc1aee5535"
 
 [[package]]
 name = "bv"
@@ -546,9 +447,9 @@ checksum = "c4872d67bab6358e59559027aa3b9157c53d9358c51423c17554809a8858e0f8"
 
 [[package]]
 name = "bzip2"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6afcd980b5f3a45017c57e57a2fcccbb351cc43a356ce117ef760ef8052b89b0"
+checksum = "bdb116a6ef3f6c3698828873ad02c3014b3c85cadb88496095628e3ef1e347f8"
 dependencies = [
  "bzip2-sys",
  "libc",
@@ -1002,18 +903,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enum_dispatch"
-version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0eb359f1476bf611266ac1f5355bc14aeca37b299d0ebccc038ee7058891c9cb"
-dependencies = [
- "once_cell",
- "proc-macro2 1.0.39",
- "quote 1.0.18",
- "syn 1.0.96",
-]
-
-[[package]]
 name = "env_logger"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1282,9 +1171,9 @@ checksum = "78cc372d058dcf6d5ecd98510e7fbc9e5aec4d21de70f65fea8fecebcd881bd4"
 
 [[package]]
 name = "h2"
-version = "0.3.13"
+version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37a82c6d637fc9515a4694bbf1cb2457b79d81ce52b3108bdeea58b07dd34a57"
+checksum = "17f8a914c2987b688368b5138aa05321db91f4090cf26118185672ad588bce21"
 dependencies = [
  "bytes",
  "fnv",
@@ -1671,9 +1560,10 @@ dependencies = [
 
 [[package]]
 name = "lido"
-version = "1.3.3"
+version = "1.3.6"
 dependencies = [
- "borsh 0.9.3",
+ "arrayref",
+ "borsh",
  "num-derive",
  "num-traits",
  "serde",
@@ -1690,7 +1580,7 @@ checksum = "7fb9b38af92608140b86b693604b9ffcc5824240a484d1ecd4795bacb2fe88f3"
 
 [[package]]
 name = "listener"
-version = "1.3.3"
+version = "1.3.6"
 dependencies = [
  "chrono",
  "clap 3.1.18",
@@ -2362,12 +2252,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
-name = "rustc-hex"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e75f6a532d0fd9f7f13144f392b6ad56a32696bfcd9c78f797f16bbb6f072d6"
-
-[[package]]
 name = "rustc_version"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2905,8 +2789,8 @@ dependencies = [
  "bincode",
  "bitflags",
  "blake3",
- "borsh 0.9.3",
- "borsh-derive 0.9.3",
+ "borsh",
+ "borsh-derive",
  "bs58 0.4.0",
  "bv",
  "bytemuck",
@@ -3058,7 +2942,7 @@ dependencies = [
  "base64 0.13.0",
  "bincode",
  "bitflags",
- "borsh 0.9.3",
+ "borsh",
  "bs58 0.4.0",
  "bytemuck",
  "byteorder",
@@ -3201,11 +3085,11 @@ dependencies = [
 
 [[package]]
 name = "solido-cli-common"
-version = "1.3.3"
+version = "1.3.6"
 dependencies = [
  "anchor-lang",
- "anker",
  "bincode",
+ "borsh",
  "lido",
  "num-traits",
  "rusqlite",
@@ -3240,21 +3124,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spl-math"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ecdd22720b9e5ab578a862928f5010ca197419502bdace600ccd5d23dae9352"
-dependencies = [
- "borsh 0.7.2",
- "borsh-derive 0.8.2",
- "num-derive",
- "num-traits",
- "solana-program",
- "thiserror",
- "uint",
-]
-
-[[package]]
 name = "spl-memo"
 version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3278,32 +3147,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "spl-token-swap"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c63b79be6174568e8724912b15e62d0c6b0424ac98397e9a5a867ac2881553af"
-dependencies = [
- "arrayref",
- "enum_dispatch",
- "num-derive",
- "num-traits",
- "solana-program",
- "spl-math",
- "spl-token",
- "thiserror",
-]
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
-
-[[package]]
-name = "static_assertions"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strsim"
@@ -3493,7 +3340,7 @@ dependencies = [
 [[package]]
 name = "tiny_http"
 version = "0.11.0"
-source = "git+https://github.com/ruuda/tiny-http?rev=3568e8880f995dd0348feff9e29645fce995b534#3568e8880f995dd0348feff9e29645fce995b534"
+source = "git+https://github.com/tiny-http/tiny-http?rev=f0fce7ed0bdf7439b5bd0b2d15fa82944aac30f6#f0fce7ed0bdf7439b5bd0b2d15fa82944aac30f6"
 dependencies = [
  "ascii",
  "chunked_transfer",
@@ -3653,18 +3500,6 @@ name = "typenum"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcf81ac59edc17cc8697ff311e8f5ef2d99fcbd9817b34cec66f90b6c3dfd987"
-
-[[package]]
-name = "uint"
-version = "0.8.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9db035e67dfaf7edd9aebfe8676afcd63eed53c8a4044fed514c8cccf1835177"
-dependencies = [
- "byteorder",
- "crunchy",
- "rustc-hex",
- "static_assertions",
-]
 
 [[package]]
 name = "unicode-bidi"

@@ -46,14 +46,14 @@ use solana_sdk::transaction::Transaction;
 use solana_transaction_status::{TransactionDetails, UiTransactionEncoding};
 use solana_vote_program::vote_state::VoteState;
 
-use anker::state::Anker;
-use lido::state::Lido;
+use lido::state::{AccountList, Lido, ListEntry};
 use lido::token::Lamports;
 use spl_token::solana_program::hash::Hash;
 
 use crate::error::{
     self, Error, MissingAccountError, MissingValidatorInfoError, SerializationError,
 };
+use crate::per64::per64;
 use crate::validator_info_utils::ValidatorInfo;
 
 pub enum SnapshotError {
@@ -217,6 +217,55 @@ impl<'a> Snapshot<'a> {
         }
     }
 
+    /// Get a map of validator identities to a numerator of their block production rate.
+    /// It's like percentage, but it's per-2^64.
+    pub fn get_all_block_production_rates(&self) -> crate::Result<HashMap<Pubkey, u64>> {
+        assert!(std::mem::size_of::<u64>() >= std::mem::size_of::<usize>());
+
+        let response = self
+            .rpc_client
+            .get_block_production()
+            .map_err(|err| {
+                let wrapped_err = Error::from(err);
+                let result: Error = Box::new(wrapped_err);
+                result
+            })?
+            .value;
+
+        // Map the keys from textual form returned by the RPC to the decoded `Pubkey`,
+        // and the values to the rate.
+        let rates_of = response
+            .by_identity
+            .into_iter()
+            .map(|(key, (leader_slots, blocks_produced))| {
+                Pubkey::from_str(&key).map(|key| {
+                    let rate = if blocks_produced > 0 {
+                        per64(leader_slots as u64, blocks_produced as u64)
+                    } else {
+                        0
+                    };
+                    (key, rate)
+                })
+            })
+            .collect::<Result<HashMap<_, _>, _>>()
+            .map_err(|err| {
+                let result: Error = Box::new(err);
+                result
+            })?;
+
+        Ok(rates_of)
+    }
+
+    /// Get list of accounts of type T from Solido
+    pub fn get_account_list<T: ListEntry>(
+        &mut self,
+        address: &Pubkey,
+    ) -> crate::Result<AccountList<T>> {
+        let list_account = self.get_account(address)?;
+        let mut data = list_account.data.to_vec();
+        AccountList::from(&mut data).map_err(|e| e.into())
+    }
+
     /// Read an account and immediately bincode-deserialize it.
     pub fn get_bincode<T: Sysvar>(&mut self, address: &Pubkey) -> crate::Result<T> {
         let account = self.get_account(address)?;
@@ -358,25 +407,6 @@ impl<'a> Snapshot<'a> {
         }
     }
 
-    /// Read the account and deserialize the Anker struct.
-    pub fn get_anker(&mut self, anker_address: &Pubkey) -> crate::Result<Anker> {
-        let account = self.get_account(anker_address)?;
-        match try_from_slice_unchecked::<Anker>(&account.data) {
-            Ok(anker) => Ok(anker),
-            Err(err) => {
-                let error: Error = Box::new(SerializationError {
-                    cause: Some(err.into()),
-                    address: *anker_address,
-                    context: format!(
-                        "Failed to deserialize Anker struct, data length is {} bytes.",
-                        account.data.len()
-                    ),
-                });
-                Err(error.into())
-            }
-        }
-    }
-
     /// Return the amount in an SPL token account.
     pub fn get_spl_token_balance(&mut self, address: &Pubkey) -> crate::Result<u64> {
         let account: spl_token::state::Account = self.get_unpack(address)?;
@@ -433,11 +463,11 @@ impl<'a> Snapshot<'a> {
 
         // RpcError::ForUser is also what `confirm_transaction_with_spinner`
         // returns if it fails to confirm within a certain time.
-        return Err(RpcError::ForUser(format!(
+        Err(RpcError::ForUser(format!(
             "Failed to confirm transaction {} within 32 seconds.",
             signature,
         ))
-        .into());
+        .into())
     }
 
     /// Send a transaction, show a spinner on stdout.
@@ -495,7 +525,11 @@ pub struct SnapshotClient {
 /// on their validator. At the time of writing, it defaults to 100.
 fn is_too_many_inputs_error(error: &ClientError) -> bool {
     match error.kind() {
-        ClientErrorKind::RpcError(RpcError::RpcRequestError(message)) => {
+        ClientErrorKind::RpcError(RpcError::RpcResponseError {
+            code: _,
+            message,
+            data: _,
+        }) => {
             // Unfortunately, there is no way to get a structured error; all we
             // get is a string that looks like this:
             //

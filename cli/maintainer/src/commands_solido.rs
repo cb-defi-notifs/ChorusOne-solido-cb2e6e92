@@ -15,7 +15,10 @@ use lido::{
     find_authority_program_address,
     metrics::LamportsHistogram,
     processor::StakeType,
-    state::{Lido, RewardDistribution},
+    state::{
+        AccountList, Criteria, Lido, ListEntry, Maintainer, RewardDistribution, SeedRange,
+        Validator, ValidatorPerf,
+    },
     token::{Lamports, StLamports},
     util::serialize_b58,
     vote_state::get_vote_account_commission,
@@ -23,6 +26,7 @@ use lido::{
 };
 use solido_cli_common::{
     error::{CliError, Error},
+    per64::to_f64,
     snapshot::{SnapshotClientConfig, SnapshotConfig},
     validator_info_utils::ValidatorInfo,
 };
@@ -31,13 +35,14 @@ use crate::{
     commands_multisig::{
         get_multisig_program_address, propose_instruction, ProposeInstructionOutput,
     },
+    config::RemoveValidatorOpts,
     spl_token_utils::{push_create_spl_token_account, push_create_spl_token_mint},
 };
 use crate::{
     config::{
-        AddRemoveMaintainerOpts, AddValidatorOpts, CreateSolidoOpts,
-        DeactivateValidatorIfCommissionExceedsMaxOpts, DeactivateValidatorOpts, DepositOpts,
-        SetMaxValidationCommissionOpts, ShowSolidoAuthoritiesOpts, ShowSolidoOpts, WithdrawOpts,
+        AddRemoveMaintainerOpts, AddValidatorOpts, ChangeCriteriaOpts, CreateSolidoOpts,
+        CreateV2AccountsOpts, DeactivateIfViolatesOpts, DeactivateValidatorOpts, DepositOpts,
+        MigrateStateToV2Opts, ShowSolidoAuthoritiesOpts, ShowSolidoOpts, WithdrawOpts,
     },
     get_signer_from_path,
 };
@@ -67,6 +72,18 @@ pub struct CreateSolidoOutput {
     /// Authority for the minting.
     #[serde(serialize_with = "serialize_b58")]
     pub mint_authority: Pubkey,
+
+    /// Data account that holds list of validators
+    #[serde(serialize_with = "serialize_b58")]
+    pub validator_list_address: Pubkey,
+
+    /// Data account that holds list of validators
+    #[serde(serialize_with = "serialize_b58")]
+    pub validator_perf_list_address: Pubkey,
+
+    /// Data account that holds list of maintainers
+    #[serde(serialize_with = "serialize_b58")]
+    pub maintainer_list_address: Pubkey,
 }
 
 impl fmt::Display for CreateSolidoOutput {
@@ -106,19 +123,28 @@ impl fmt::Display for CreateSolidoOutput {
     }
 }
 
-pub fn command_create_solido(
-    config: &mut SnapshotConfig,
-    opts: &CreateSolidoOpts,
-) -> solido_cli_common::Result<CreateSolidoOutput> {
+/// Get keypair from key path or random if not set
+fn from_key_path_or_random(key_path: &PathBuf) -> solido_cli_common::Result<Box<dyn Signer>> {
     let lido_signer = {
-        if opts.solido_key_path() != &PathBuf::default() {
+        if key_path != &PathBuf::default() {
             // If we've been given a solido private key, use it to create the solido instance.
-            get_signer_from_path(opts.solido_key_path().clone())?
+            get_signer_from_path(key_path.clone())?
         } else {
             // If not, use a random key
             Box::new(Keypair::new())
         }
     };
+    Ok(lido_signer)
+}
+
+pub fn command_create_solido(
+    config: &mut SnapshotConfig,
+    opts: &CreateSolidoOpts,
+) -> solido_cli_common::Result<CreateSolidoOutput> {
+    let lido_signer = from_key_path_or_random(opts.solido_key_path())?;
+    let validator_list_signer = from_key_path_or_random(opts.validator_list_key_path())?;
+    let validator_perf_list_signer = from_key_path_or_random(opts.validator_perf_list_key_path())?;
+    let maintainer_list_signer = from_key_path_or_random(opts.maintainer_list_key_path())?;
 
     let (reserve_account, _) = lido::find_authority_program_address(
         opts.solido_program_id(),
@@ -135,10 +161,26 @@ pub fn command_create_solido(
     let (manager, _nonce) =
         get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
 
-    let lido_size = Lido::calculate_size(*opts.max_validators(), *opts.max_maintainers());
+    let lido_size = Lido::calculate_size();
     let lido_account_balance = config
         .client
         .get_minimum_balance_for_rent_exemption(lido_size)?;
+
+    let validator_list_size = AccountList::<Validator>::required_bytes(*opts.max_validators());
+    let validator_list_account_balance = config
+        .client
+        .get_minimum_balance_for_rent_exemption(validator_list_size)?;
+
+    let validator_perf_list_size =
+        AccountList::<ValidatorPerf>::required_bytes(*opts.max_validators());
+    let validator_perf_list_account_balance = config
+        .client
+        .get_minimum_balance_for_rent_exemption(validator_perf_list_size)?;
+
+    let maintainer_list_size = AccountList::<Maintainer>::required_bytes(*opts.max_maintainers());
+    let maintainer_list_account_balance = config
+        .client
+        .get_minimum_balance_for_rent_exemption(maintainer_list_size)?;
 
     let mut instructions = Vec::new();
 
@@ -200,6 +242,33 @@ pub fn command_create_solido(
         opts.solido_program_id(),
     ));
 
+    // Create the account that holds the validator list itself.
+    instructions.push(system_instruction::create_account(
+        &config.signer.pubkey(),
+        &validator_list_signer.pubkey(),
+        validator_list_account_balance.0,
+        validator_list_size as u64,
+        opts.solido_program_id(),
+    ));
+
+    // Create the account that holds the validator perf list itself.
+    instructions.push(system_instruction::create_account(
+        &config.signer.pubkey(),
+        &validator_perf_list_signer.pubkey(),
+        validator_perf_list_account_balance.0,
+        validator_perf_list_size as u64,
+        opts.solido_program_id(),
+    ));
+
+    // Create the account that holds the maintainer list itself.
+    instructions.push(system_instruction::create_account(
+        &config.signer.pubkey(),
+        &maintainer_list_signer.pubkey(),
+        maintainer_list_account_balance.0,
+        maintainer_list_size as u64,
+        opts.solido_program_id(),
+    ));
+
     instructions.push(lido::instruction::initialize(
         opts.solido_program_id(),
         RewardDistribution {
@@ -207,20 +276,36 @@ pub fn command_create_solido(
             developer_fee: *opts.developer_fee_share(),
             st_sol_appreciation: *opts.st_sol_appreciation_share(),
         },
+        Criteria {
+            max_commission: *opts.max_commission(),
+            min_block_production_rate: *opts.min_block_production_rate(),
+            min_vote_success_rate: *opts.min_vote_success_rate(),
+        },
         *opts.max_validators(),
         *opts.max_maintainers(),
-        *opts.max_commission_percentage(),
         &lido::instruction::InitializeAccountsMeta {
             lido: lido_signer.pubkey(),
-            st_sol_mint: st_sol_mint_pubkey,
             manager,
+            st_sol_mint: st_sol_mint_pubkey,
             treasury_account: treasury_keypair.pubkey(),
             developer_account: developer_keypair.pubkey(),
             reserve_account,
+            validator_list: validator_list_signer.pubkey(),
+            validator_perf_list: validator_perf_list_signer.pubkey(),
+            maintainer_list: maintainer_list_signer.pubkey(),
         },
     ));
 
-    config.sign_and_send_transaction(&instructions[..], &[config.signer, &*lido_signer])?;
+    config.sign_and_send_transaction(
+        &instructions[..],
+        &vec![
+            config.signer,
+            &*lido_signer,
+            &*validator_list_signer,
+            &*validator_perf_list_signer,
+            &*maintainer_list_signer,
+        ],
+    )?;
     eprintln!("Did send Lido init.");
 
     let result = CreateSolidoOutput {
@@ -230,6 +315,9 @@ pub fn command_create_solido(
         st_sol_mint_address: st_sol_mint_pubkey,
         treasury_account: treasury_keypair.pubkey(),
         developer_account: developer_keypair.pubkey(),
+        validator_list_address: validator_list_signer.pubkey(),
+        validator_perf_list_address: validator_perf_list_signer.pubkey(),
+        maintainer_list_address: maintainer_list_signer.pubkey(),
     };
     Ok(result)
 }
@@ -242,12 +330,15 @@ pub fn command_add_validator(
     let (multisig_address, _) =
         get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
 
+    let solido = config.client.get_solido(opts.solido_address())?;
+
     let instruction = lido::instruction::add_validator(
         opts.solido_program_id(),
         &lido::instruction::AddValidatorMetaV2 {
             lido: *opts.solido_address(),
             manager: multisig_address,
             validator_vote_account: *opts.validator_vote_account(),
+            validator_list: solido.validator_list,
         },
     );
     propose_instruction(
@@ -266,13 +357,24 @@ pub fn command_deactivate_validator(
     let (multisig_address, _) =
         get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
 
+    let solido = config.client.get_solido(opts.solido_address())?;
+    let validators = config
+        .client
+        .get_account_list::<Validator>(&solido.validator_list)?;
+
+    let validator_index = validators
+        .position(opts.validator_vote_account())
+        .ok_or_else(|| CliError::new("Pubkey not found in validator list"))?;
+
     let instruction = lido::instruction::deactivate_validator(
         opts.solido_program_id(),
-        &lido::instruction::DeactivateValidatorMeta {
+        &lido::instruction::DeactivateValidatorMetaV2 {
             lido: *opts.solido_address(),
             manager: multisig_address,
             validator_vote_account_to_deactivate: *opts.validator_vote_account(),
+            validator_list: solido.validator_list,
         },
+        validator_index,
     );
     propose_instruction(
         config,
@@ -289,12 +391,16 @@ pub fn command_add_maintainer(
 ) -> solido_cli_common::Result<ProposeInstructionOutput> {
     let (multisig_address, _) =
         get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
+
+    let solido = config.client.get_solido(opts.solido_address())?;
+
     let instruction = lido::instruction::add_maintainer(
         opts.solido_program_id(),
-        &lido::instruction::AddMaintainerMeta {
+        &lido::instruction::AddMaintainerMetaV2 {
             lido: *opts.solido_address(),
             manager: multisig_address,
             maintainer: *opts.maintainer_address(),
+            maintainer_list: solido.maintainer_list,
         },
     );
     propose_instruction(
@@ -312,13 +418,25 @@ pub fn command_remove_maintainer(
 ) -> solido_cli_common::Result<ProposeInstructionOutput> {
     let (multisig_address, _) =
         get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
+
+    let solido = config.client.get_solido(opts.solido_address())?;
+    let maintainers = config
+        .client
+        .get_account_list::<Maintainer>(&solido.maintainer_list)?;
+
+    let maintainer_index = maintainers
+        .position(opts.maintainer_address())
+        .ok_or_else(|| CliError::new("Pubkey not found in maintainer list"))?;
+
     let instruction = lido::instruction::remove_maintainer(
         opts.solido_program_id(),
-        &lido::instruction::RemoveMaintainerMeta {
+        &lido::instruction::RemoveMaintainerMetaV2 {
             lido: *opts.solido_address(),
             manager: multisig_address,
             maintainer: *opts.maintainer_address(),
+            maintainer_list: solido.maintainer_list,
         },
+        maintainer_index,
     );
     propose_instruction(
         config,
@@ -326,6 +444,28 @@ pub fn command_remove_maintainer(
         *opts.multisig_address(),
         instruction,
     )
+}
+
+/// `Validator` structure with all the fields from its related structs
+/// joined by its `Pubkey`.
+#[derive(Serialize)]
+pub struct RichValidator {
+    #[serde(serialize_with = "serialize_b58")]
+    pub vote_account_address: Pubkey,
+    pub stake_seeds: SeedRange,
+    pub unstake_seeds: SeedRange,
+    pub stake_accounts_balance: Lamports,
+    pub unstake_accounts_balance: Lamports,
+    pub effective_stake_balance: Lamports,
+    pub active: bool,
+
+    #[serde(serialize_with = "serialize_b58")]
+    pub identity_account_address: Pubkey,
+
+    pub info: ValidatorInfo,
+    pub perf: Option<ValidatorPerf>,
+
+    pub commission: u8,
 }
 
 #[derive(Serialize)]
@@ -347,14 +487,55 @@ pub struct ShowSolidoOutput {
     #[serde(serialize_with = "serialize_b58")]
     pub mint_authority: Pubkey,
 
-    /// Identity account address for all validators in the same order as `solido.validators`.
-    pub validator_identities: Vec<Pubkey>,
+    /// Validator structure as the program sees it, along with the validator's
+    /// identity account address, their info, their performance data,
+    /// and their commission percentage.
+    pub validators: Vec<RichValidator>,
+    pub validators_max: u32,
 
-    /// Contains validator info in the same order as `solido.validators`.
-    pub validator_infos: Vec<ValidatorInfo>,
+    pub maintainers: Vec<Maintainer>,
+    pub maintainers_max: u32,
 
-    /// Contains validator fees in the same order as `solido.validators`.
-    pub validator_commission_percentages: Vec<u8>,
+    pub reserve_account_balance: Lamports,
+}
+
+pub const VALIDATOR_STAKE_ACCOUNT: &[u8] = b"validator_stake_account";
+pub const VALIDATOR_UNSTAKE_ACCOUNT: &[u8] = b"validator_unstake_account";
+
+fn find_stake_account_address_with_authority(
+    vote_account_address: &Pubkey,
+    program_id: &Pubkey,
+    solido_account: &Pubkey,
+    authority: &[u8],
+    seed: u64,
+) -> (Pubkey, u8) {
+    let seeds = [
+        &solido_account.to_bytes(),
+        &vote_account_address.to_bytes(),
+        authority,
+        &seed.to_le_bytes()[..],
+    ];
+    Pubkey::find_program_address(&seeds, program_id)
+}
+
+fn find_stake_account_address(
+    vote_account_address: &Pubkey,
+    program_id: &Pubkey,
+    solido_account: &Pubkey,
+    seed: u64,
+    stake_type: StakeType,
+) -> (Pubkey, u8) {
+    let authority = match stake_type {
+        StakeType::Stake => VALIDATOR_STAKE_ACCOUNT,
+        StakeType::Unstake => VALIDATOR_UNSTAKE_ACCOUNT,
+    };
+    find_stake_account_address_with_authority(
+        vote_account_address,
+        program_id,
+        solido_account,
+        authority,
+        seed,
+    )
 }
 
 impl fmt::Display for ShowSolidoOutput {
@@ -382,6 +563,8 @@ impl fmt::Display for ShowSolidoOutput {
             "  stSOL supply:      {}",
             self.solido.exchange_rate.st_sol_supply
         )?;
+
+        writeln!(f, "\nReserve balance: {}", self.reserve_account_balance)?;
 
         writeln!(f, "\nAuthorities (public key, bump seed):")?;
         writeln!(
@@ -416,19 +599,13 @@ impl fmt::Display for ShowSolidoOutput {
         writeln!(f, "\nFee recipients:")?;
         writeln!(
             f,
-            "Treasury SPL token account:      {}",
+            "  Treasury SPL token account:      {}",
             self.solido.fee_recipients.treasury_account
         )?;
         writeln!(
             f,
-            "Developer fee SPL token account: {}",
+            "  Developer fee SPL token account: {}",
             self.solido.fee_recipients.developer_account
-        )?;
-
-        writeln!(
-            f,
-            "Max validation commission: {}%",
-            self.solido.max_commission_percentage
         )?;
 
         writeln!(f, "\nMetrics:")?;
@@ -481,21 +658,31 @@ impl fmt::Display for ShowSolidoOutput {
             )?;
         }
 
+        writeln!(f, "\nValidator curation criteria:")?;
         writeln!(
             f,
-            "\nValidators: {} in use out of {} that the instance can support",
-            self.solido.validators.len(),
-            self.solido.validators.maximum_entries
+            "  Max validation commission: {}%",
+            self.solido.criteria.max_commission,
         )?;
-        for (((pe, identity), info), commission) in self
-            .solido
-            .validators
-            .entries
-            .iter()
-            .zip(&self.validator_identities)
-            .zip(&self.validator_infos)
-            .zip(&self.validator_commission_percentages)
-        {
+        writeln!(
+            f,
+            "  Min block production rate: {:.2}%",
+            100.0 * to_f64(self.solido.criteria.min_block_production_rate),
+        )?;
+        writeln!(
+            f,
+            "  Min vote success rate:     {:.2}%",
+            100.0 * to_f64(self.solido.criteria.min_vote_success_rate),
+        )?;
+
+        writeln!(f, "\nValidator list {}", self.solido.validator_list)?;
+        writeln!(
+            f,
+            "Validators: {} in use out of {} that the instance can support",
+            self.validators.len(),
+            self.validators_max,
+        )?;
+        for v in self.validators.iter() {
             writeln!(
                 f,
                 "\n  - \
@@ -503,35 +690,36 @@ impl fmt::Display for ShowSolidoOutput {
                 Keybase username:          {}\n    \
                 Vote account:              {}\n    \
                 Identity account:          {}\n    \
-                Commission:                {}%\n   \
+                Commission:                {}%\n    \
                 Active:                    {}\n    \
                 Stake in all accounts:     {}\n    \
                 Stake in stake accounts:   {}\n    \
                 Stake in unstake accounts: {}",
-                info.name,
-                match &info.keybase_username {
+                v.info.name,
+                match &v.info.keybase_username {
                     Some(username) => &username[..],
                     None => "not set",
                 },
-                pe.pubkey,
-                identity,
-                commission,
-                pe.entry.active,
-                pe.entry.stake_accounts_balance,
-                pe.entry.effective_stake_balance(),
-                pe.entry.unstake_accounts_balance,
+                v.vote_account_address,
+                v.identity_account_address,
+                v.commission,
+                v.active,
+                v.stake_accounts_balance,
+                v.effective_stake_balance,
+                v.unstake_accounts_balance,
             )?;
 
             writeln!(f, "    Stake accounts (seed, address):")?;
-            if pe.entry.stake_seeds.begin == pe.entry.stake_seeds.end {
+            if v.stake_seeds.begin == v.stake_seeds.end {
                 writeln!(f, "      This validator has no stake accounts.")?;
             };
-            for seed in &pe.entry.stake_seeds {
+            for seed in &v.stake_seeds {
                 writeln!(
                     f,
                     "      - {}: {}",
                     seed,
-                    pe.find_stake_account_address(
+                    find_stake_account_address(
+                        &v.vote_account_address,
                         &self.solido_program_id,
                         &self.solido_address,
                         seed,
@@ -542,15 +730,16 @@ impl fmt::Display for ShowSolidoOutput {
             }
 
             writeln!(f, "    Unstake accounts (seed, address):")?;
-            if pe.entry.unstake_seeds.begin == pe.entry.unstake_seeds.end {
+            if v.unstake_seeds.begin == v.unstake_seeds.end {
                 writeln!(f, "      This validator has no unstake accounts.")?;
             };
-            for seed in &pe.entry.unstake_seeds {
+            for seed in &v.unstake_seeds {
                 writeln!(
                     f,
                     "      - {}: {}",
                     seed,
-                    pe.find_stake_account_address(
+                    find_stake_account_address(
+                        &v.vote_account_address,
                         &self.solido_program_id,
                         &self.solido_address,
                         seed,
@@ -559,15 +748,52 @@ impl fmt::Display for ShowSolidoOutput {
                     .0
                 )?;
             }
+
+            writeln!(f, "    Off-chain performance readings:")?;
+            if let Some(Some(perf)) = v.perf.as_ref().map(|perf| &perf.rest) {
+                writeln!(
+                    f,
+                    "      For epoch                  #{}", // --
+                    perf.updated_at,
+                )?;
+                writeln!(
+                    f,
+                    "      Block Production Rate:      {:.2}%",
+                    100.0 * to_f64(perf.block_production_rate)
+                )?;
+                writeln!(
+                    f,
+                    "      Vote Success Rate:          {:.2}%",
+                    100.0 * to_f64(perf.vote_success_rate)
+                )?;
+            } else {
+                writeln!(f, "      Not yet collected.")?;
+            }
+            writeln!(f, "    On-chain performance readings:")?;
+            if let Some(perf) = &v.perf {
+                writeln!(
+                    f,
+                    "      For epoch                  #{}",
+                    perf.commission_updated_at,
+                )?;
+                writeln!(
+                    f,
+                    "      Worst Commission:           {}%", // --
+                    perf.commission
+                )?;
+            } else {
+                writeln!(f, "      Not yet collected.")?;
+            }
         }
+        writeln!(f, "\nMaintainer list {}", self.solido.maintainer_list)?;
         writeln!(
             f,
-            "\nMaintainers: {} in use out of {} that the instance can support\n",
-            self.solido.maintainers.len(),
-            self.solido.maintainers.maximum_entries
+            "Maintainers: {} in use out of {} that the instance can support\n",
+            self.maintainers.len(),
+            self.maintainers_max,
         )?;
-        for pe in &self.solido.maintainers.entries {
-            writeln!(f, "  - {}", pe.pubkey)?;
+        for e in &self.maintainers {
+            writeln!(f, "  - {}", e.pubkey())?;
         }
         Ok(())
     }
@@ -585,30 +811,81 @@ pub fn command_show_solido(
     let mint_authority =
         lido.get_mint_authority(opts.solido_program_id(), opts.solido_address())?;
 
+    let reserve_account_balance = config.client.get_account(&reserve_account)?.lamports;
+
+    let validators = config
+        .client
+        .get_account_list::<Validator>(&lido.validator_list)?;
+    let available_perfs = config
+        .client
+        .get_account_list::<ValidatorPerf>(&lido.validator_perf_list)?;
+    let validators_max = validators.header.max_entries;
+    let validators = validators.entries;
+    let maintainers = config
+        .client
+        .get_account_list::<Maintainer>(&lido.maintainer_list)?;
+    let maintainers_max = maintainers.header.max_entries;
+    let maintainers = maintainers.entries;
+
     let mut validator_identities = Vec::new();
     let mut validator_infos = Vec::new();
     let mut validator_commission_percentages = Vec::new();
-    for validator in lido.validators.entries.iter() {
-        let vote_state = config.client.get_vote_account(&validator.pubkey)?;
+    let mut validator_perfs = Vec::new();
+    for validator in validators.iter() {
+        let vote_state = config.client.get_vote_account(validator.pubkey())?;
         validator_identities.push(vote_state.node_pubkey);
         let info = config.client.get_validator_info(&vote_state.node_pubkey)?;
         validator_infos.push(info);
-        let vote_account = config.client.get_account(&validator.pubkey)?;
+        let vote_account = config.client.get_account(validator.pubkey())?;
         let commission = get_vote_account_commission(&vote_account.data)
+            .ok()
             .ok_or_else(|| CliError::new("Validator account data too small"))?;
         validator_commission_percentages.push(commission);
+        // On the chain, the validator's performance is stored in a separate
+        // account list, and it is written down in "first come, first serve" order.
+        // But here in the CLI, we join the two lists by validator pubkey,
+        // so that the two lists have the same indices.
+        let perf = available_perfs
+            .entries
+            .iter()
+            .find(|perf| &perf.validator_vote_account_address == validator.pubkey());
+        validator_perfs.push(perf.cloned());
     }
+    let validators = validators
+        .into_iter()
+        .zip(validator_identities.into_iter())
+        .zip(validator_infos.into_iter())
+        .zip(validator_perfs.into_iter())
+        .zip(validator_commission_percentages.into_iter())
+        .map(
+            |((((v, identity), info), perf), commission)| RichValidator {
+                active: v.is_active(),
+                vote_account_address: v.pubkey().to_owned(),
+                stake_seeds: v.stake_seeds,
+                unstake_seeds: v.unstake_seeds,
+                stake_accounts_balance: v.stake_accounts_balance,
+                unstake_accounts_balance: v.unstake_accounts_balance,
+                effective_stake_balance: v.effective_stake_balance,
+                identity_account_address: identity,
+                info,
+                perf,
+                commission,
+            },
+        )
+        .collect();
 
     Ok(ShowSolidoOutput {
         solido_program_id: *opts.solido_program_id(),
         solido_address: *opts.solido_address(),
         solido: lido,
-        validator_identities,
-        validator_infos,
-        validator_commission_percentages,
         reserve_account,
         stake_authority,
         mint_authority,
+        validators,
+        validators_max,
+        maintainers,
+        maintainers_max,
+        reserve_account_balance: Lamports(reserve_account_balance),
     })
 }
 
@@ -820,6 +1097,10 @@ pub fn command_withdraw(
     let (st_sol_address, new_stake_account) = config.with_snapshot(|config| {
         let solido = config.client.get_solido(opts.solido_address())?;
 
+        let validators = config
+            .client
+            .get_account_list::<Validator>(&solido.validator_list)?;
+
         let st_sol_address = spl_associated_token_account::get_associated_token_address(
             &config.signer.pubkey(),
             &solido.st_sol_mint,
@@ -829,7 +1110,7 @@ pub fn command_withdraw(
             solido.get_stake_authority(opts.solido_program_id(), opts.solido_address())?;
 
         // Get heaviest validator.
-        let heaviest_validator = get_validator_to_withdraw(&solido.validators).map_err(|err| {
+        let heaviest_validator = get_validator_to_withdraw(&validators).map_err(|err| {
             CliError::with_cause(
                 "The instance has no active validators to withdraw from.",
                 err,
@@ -839,25 +1120,30 @@ pub fn command_withdraw(
         let (stake_address, _bump_seed) = heaviest_validator.find_stake_account_address(
             opts.solido_program_id(),
             opts.solido_address(),
-            heaviest_validator.entry.stake_seeds.begin,
+            heaviest_validator.stake_seeds.begin,
             StakeType::Stake,
         );
 
         let destination_stake_account = Keypair::new();
+        let validator_index = validators
+            .position(heaviest_validator.pubkey())
+            .ok_or_else(|| CliError::new("Pubkey not found in validator list"))?;
 
         let instr = lido::instruction::withdraw(
             opts.solido_program_id(),
-            &lido::instruction::WithdrawAccountsMeta {
+            &lido::instruction::WithdrawAccountsMetaV2 {
                 lido: *opts.solido_address(),
                 st_sol_mint: solido.st_sol_mint,
                 st_sol_account_owner: config.signer.pubkey(),
                 st_sol_account: st_sol_address,
-                validator_vote_account: heaviest_validator.pubkey,
+                validator_vote_account: *heaviest_validator.pubkey(),
                 source_stake_account: stake_address,
                 destination_stake_account: destination_stake_account.pubkey(),
                 stake_authority,
+                validator_list: solido.validator_list,
             },
             *opts.amount_st_sol(),
+            validator_index,
         );
         config.sign_and_send_transaction(&[instr], &[config.signer, &destination_stake_account])?;
 
@@ -877,7 +1163,7 @@ pub fn command_withdraw(
 }
 
 #[derive(Serialize)]
-pub struct DeactivateValidatorIfCommissionExceedsMaxOutput {
+pub struct DeactivateIfViolatesOutput {
     // List of validators that exceeded max commission
     entries: Vec<ValidatorViolationInfo>,
     max_commission_percentage: u8,
@@ -890,7 +1176,7 @@ struct ValidatorViolationInfo {
     pub commission: u8,
 }
 
-impl fmt::Display for DeactivateValidatorIfCommissionExceedsMaxOutput {
+impl fmt::Display for DeactivateIfViolatesOutput {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(
             f,
@@ -909,67 +1195,83 @@ impl fmt::Display for DeactivateValidatorIfCommissionExceedsMaxOutput {
     }
 }
 
-/// CLI entry point to punish validator for commission violation.
-pub fn command_deactivate_validator_if_commission_exceeds_max(
+/// CLI entry point to curate out the validators that violate the thresholds
+pub fn command_deactivate_if_violates(
     config: &mut SnapshotConfig,
-    opts: &DeactivateValidatorIfCommissionExceedsMaxOpts,
-) -> solido_cli_common::Result<DeactivateValidatorIfCommissionExceedsMaxOutput> {
+    opts: &DeactivateIfViolatesOpts,
+) -> solido_cli_common::Result<DeactivateIfViolatesOutput> {
     let solido = config.client.get_solido(opts.solido_address())?;
+
+    let validators = config
+        .client
+        .get_account_list::<Validator>(&solido.validator_list)?;
 
     let mut violations = vec![];
     let mut instructions = vec![];
-    for pubkey_entry in solido.validators.entries {
-        let validator = pubkey_entry.entry;
-        let vote_pubkey = pubkey_entry.pubkey;
-        let validator_account = config.client.get_account(&vote_pubkey)?;
+    for validator in validators.entries.iter() {
+        let vote_pubkey = validator.pubkey();
+        let validator_account = config.client.get_account(vote_pubkey)?;
         let commission = get_vote_account_commission(&validator_account.data)
+            .ok()
             .ok_or_else(|| CliError::new("Validator account data too small"))?;
 
-        if !validator.active || commission <= solido.max_commission_percentage {
+        if !validator.is_active() || commission <= solido.criteria.max_commission {
             continue;
         }
 
-        let instruction = lido::instruction::deactivate_validator_if_commission_exceeds_max(
+        let instruction = lido::instruction::deactivate_if_violates(
             opts.solido_program_id(),
-            &lido::instruction::DeactivateValidatorIfCommissionExceedsMaxMeta {
+            &lido::instruction::DeactivateIfViolatesMeta {
                 lido: *opts.solido_address(),
-                validator_vote_account_to_deactivate: vote_pubkey,
+                validator_vote_account_to_deactivate: *validator.pubkey(),
+                validator_list: solido.validator_list,
+                validator_perf_list: solido.validator_perf_list,
             },
         );
         instructions.push(instruction);
         violations.push(ValidatorViolationInfo {
-            validator_vote_account: vote_pubkey,
+            validator_vote_account: *validator.pubkey(),
             commission,
         });
     }
 
     let signers: Vec<&dyn Signer> = vec![];
     // Due to the fact that Solana has a limit on number of instructions in a transaction
-    // this can fall if there would be alot of misbehaved validators each
+    // this can fall if there would be a lot of misbehaved validators each
     // exceeding `max_commission_percentage`. But it is a very improbable scenario.
     config.sign_and_send_transaction(&instructions, &signers)?;
 
-    Ok(DeactivateValidatorIfCommissionExceedsMaxOutput {
+    Ok(DeactivateIfViolatesOutput {
         entries: violations,
-        max_commission_percentage: solido.max_commission_percentage,
+        max_commission_percentage: solido.criteria.max_commission,
     })
 }
 
-/// CLI entry point to set max validation commission
-pub fn command_set_max_commission_percentage(
+/// CLI entry point to mark a validator as subject to removal.
+pub fn command_remove_validator(
     config: &mut SnapshotConfig,
-    opts: &SetMaxValidationCommissionOpts,
+    opts: &RemoveValidatorOpts,
 ) -> solido_cli_common::Result<ProposeInstructionOutput> {
+    let solido = config.client.get_solido(opts.solido_address())?;
+
+    let validators = config
+        .client
+        .get_account_list::<Validator>(&solido.validator_list)?;
+
     let (multisig_address, _) =
         get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
 
-    let instruction = lido::instruction::set_max_commission_percentage(
+    let instruction = lido::instruction::enqueue_validator_for_removal(
         opts.solido_program_id(),
-        &lido::instruction::SetMaxValidationCommissionMeta {
+        &lido::instruction::EnqueueValidatorForRemovalMetaV2 {
             lido: *opts.solido_address(),
             manager: multisig_address,
+            validator_vote_account_to_remove: *opts.validator_vote_account(),
+            validator_list: solido.validator_list,
         },
-        *opts.max_commission_percentage(),
+        validators
+            .position(opts.validator_vote_account())
+            .ok_or_else(|| CliError::new("Pubkey not found in validator list"))?,
     );
     propose_instruction(
         config,
@@ -977,4 +1279,168 @@ pub fn command_set_max_commission_percentage(
         *opts.multisig_address(),
         instruction,
     )
+}
+
+/// CLI entry point to change the thresholds of curating out the validators
+pub fn command_change_criteria(
+    config: &mut SnapshotConfig,
+    opts: &ChangeCriteriaOpts,
+) -> solido_cli_common::Result<ProposeInstructionOutput> {
+    let (multisig_address, _) =
+        get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
+
+    let instruction = lido::instruction::change_criteria(
+        opts.solido_program_id(),
+        &lido::instruction::ChangeCriteriaMeta {
+            lido: *opts.solido_address(),
+            manager: multisig_address,
+        },
+        Criteria {
+            max_commission: *opts.max_commission(),
+            min_block_production_rate: *opts.min_block_production_rate(),
+            min_vote_success_rate: *opts.min_vote_success_rate(),
+        },
+    );
+    propose_instruction(
+        config,
+        opts.multisig_program_id(),
+        *opts.multisig_address(),
+        instruction,
+    )
+}
+
+#[derive(Serialize)]
+pub struct CreateV2AccountsOutput {
+    /// Account that stores validator list data.
+    #[serde(serialize_with = "serialize_b58")]
+    validator_list_address: Pubkey,
+    /// Account that stores maintainer list data.
+    #[serde(serialize_with = "serialize_b58")]
+    maintainer_list_address: Pubkey,
+    /// Account that will receive developer stSOL fee
+    #[serde(serialize_with = "serialize_b58")]
+    developer_fee_address: Pubkey,
+}
+
+impl fmt::Display for CreateV2AccountsOutput {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "Created new v2 accounts:")?;
+        writeln!(
+            f,
+            "  Validator list account:   {}",
+            self.validator_list_address
+        )?;
+        writeln!(
+            f,
+            "  Maintainer list account:  {}",
+            self.maintainer_list_address
+        )?;
+        writeln!(
+            f,
+            "  Developer fee account:    {}",
+            self.developer_fee_address
+        )?;
+        Ok(())
+    }
+}
+
+/// CLI entry point to create new accounts for Solido v2.
+pub fn command_create_v2_accounts(
+    config: &mut SnapshotConfig,
+    opts: &CreateV2AccountsOpts,
+) -> solido_cli_common::Result<CreateV2AccountsOutput> {
+    let validator_list_signer = Keypair::new();
+    let maintainer_list_signer = Keypair::new();
+
+    let validator_list_size = AccountList::<Validator>::required_bytes(50_000);
+    let validator_list_account_balance = config
+        .client
+        .get_minimum_balance_for_rent_exemption(validator_list_size)?;
+
+    let maintainer_list_size = AccountList::<Maintainer>::required_bytes(5_000);
+    let maintainer_list_account_balance = config
+        .client
+        .get_minimum_balance_for_rent_exemption(maintainer_list_size)?;
+
+    let mut instructions = Vec::new();
+
+    let developer_keypair = push_create_spl_token_account(
+        config,
+        &mut instructions,
+        opts.st_sol_mint(),
+        opts.developer_account_owner(),
+    )?;
+
+    // Create the account that holds the validator list itself.
+    instructions.push(system_instruction::create_account(
+        &config.signer.pubkey(),
+        &validator_list_signer.pubkey(),
+        validator_list_account_balance.0,
+        validator_list_size as u64,
+        opts.solido_program_id(),
+    ));
+
+    // Create the account that holds the maintainer list itself.
+    instructions.push(system_instruction::create_account(
+        &config.signer.pubkey(),
+        &maintainer_list_signer.pubkey(),
+        maintainer_list_account_balance.0,
+        maintainer_list_size as u64,
+        opts.solido_program_id(),
+    ));
+
+    config.sign_and_send_transaction(
+        &instructions[..],
+        &[
+            config.signer,
+            &validator_list_signer,
+            &maintainer_list_signer,
+            &developer_keypair,
+        ],
+    )?;
+    Ok(CreateV2AccountsOutput {
+        validator_list_address: validator_list_signer.pubkey(),
+        maintainer_list_address: maintainer_list_signer.pubkey(),
+        developer_fee_address: developer_keypair.pubkey(),
+    })
+}
+
+/// CLI entry point to update Solido state to V2
+pub fn command_migrate_state_to_v2(
+    config: &mut SnapshotClientConfig,
+    opts: &MigrateStateToV2Opts,
+) -> solido_cli_common::Result<ProposeInstructionOutput> {
+    let propose_output = config.with_snapshot(|config| {
+        let (multisig_address, _) =
+            get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
+
+        let instruction = lido::instruction::migrate_state_to_v2(
+            opts.solido_program_id(),
+            RewardDistribution {
+                treasury_fee: *opts.treasury_fee_share(),
+                developer_fee: *opts.developer_fee_share(),
+                st_sol_appreciation: *opts.st_sol_appreciation_share(),
+            },
+            6_700,
+            5_000,
+            *opts.max_commission_percentage(),
+            &lido::instruction::MigrateStateToV2Meta {
+                lido: *opts.solido_address(),
+                manager: multisig_address,
+                validator_list: *opts.validator_list_address(),
+                validator_perf_list: *opts.validator_perf_list_address(),
+                maintainer_list: *opts.maintainer_list_address(),
+                developer_account: *opts.developer_fee_address(),
+            },
+        );
+
+        propose_instruction(
+            config,
+            opts.multisig_program_id(),
+            *opts.multisig_address(),
+            instruction,
+        )
+    })?;
+
+    Ok(propose_output)
 }

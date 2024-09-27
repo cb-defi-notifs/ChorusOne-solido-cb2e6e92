@@ -1,23 +1,20 @@
 // SPDX-FileCopyrightText: 2021 Chorus One AG
 // SPDX-License-Identifier: GPL-3.0
 
+use itertools::Itertools;
 use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 
 use anchor_lang::prelude::{AccountMeta, ToAccountMetas};
 use anchor_lang::{Discriminator, InstructionData};
-use anker::instruction::{
-    ChangeSellRewardsMinOutBpsAccountsMeta, ChangeTerraRewardsDestinationAccountsMeta,
-    ChangeTokenSwapPoolAccountsMeta,
-};
-use anker::wormhole::TerraAddress;
 use borsh::de::BorshDeserialize;
 use borsh::ser::BorshSerialize;
 use clap::Parser;
 use serde::Serialize;
 use serum_multisig::accounts as multisig_accounts;
 use serum_multisig::instruction as multisig_instruction;
+use solana_program::bpf_loader_upgradeable::set_upgrade_authority;
 use solana_sdk::bpf_loader_upgradeable;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::program_pack::Pack;
@@ -28,11 +25,10 @@ use solana_sdk::sysvar;
 
 use lido::{
     instruction::{
-        AddMaintainerMeta, AddValidatorMetaV2, ChangeRewardDistributionMeta,
-        DeactivateValidatorMeta, LidoInstruction, RemoveMaintainerMeta,
-        SetMaxValidationCommissionMeta,
+        AddMaintainerMetaV2, AddValidatorMetaV2, ChangeCriteriaMeta, ChangeRewardDistributionMeta,
+        DeactivateValidatorMetaV2, LidoInstruction, MigrateStateToV2Meta, RemoveMaintainerMetaV2,
     },
-    state::{FeeRecipients, Lido, RewardDistribution},
+    state::{Criteria, FeeRecipients, Lido, RewardDistribution},
     util::{serialize_b58, serialize_b58_slice},
 };
 use solido_cli_common::error::Abort;
@@ -44,8 +40,8 @@ use solido_cli_common::{
 
 use crate::config::{
     ApproveBatchOpts, ApproveOpts, ConfigFile, CreateMultisigOpts, ExecuteTransactionOpts,
-    ProposeChangeMultisigOpts, ProposeUpgradeOpts, ShowMultisigOpts, ShowTransactionOpts,
-    TransferTokenOpts,
+    ProposeChangeMultisigOpts, ProposeOwnerMultisigOpts, ProposeUpgradeOpts,
+    SetUpgradeAuthorityOpts, ShowMultisigOpts, ShowTransactionOpts, TransferTokenOpts,
 };
 use crate::print_output;
 
@@ -71,6 +67,15 @@ impl MultisigOpts {
             }
             SubCommand::ProposeUpgrade(opts) => opts.merge_with_config_and_environment(config_file),
             SubCommand::ProposeChangeMultisig(opts) => {
+                opts.merge_with_config_and_environment(config_file)
+            }
+            SubCommand::ProposeAddOwner(opts) => {
+                opts.merge_with_config_and_environment(config_file)
+            }
+            SubCommand::ProposeRevokeOwner(opts) => {
+                opts.merge_with_config_and_environment(config_file)
+            }
+            SubCommand::SetUpgradeAuthority(opts) => {
                 opts.merge_with_config_and_environment(config_file)
             }
             SubCommand::Approve(opts) => opts.merge_with_config_and_environment(config_file),
@@ -100,6 +105,15 @@ enum SubCommand {
     /// Propose replacing the set of owners or threshold of this multisig.
     ProposeChangeMultisig(ProposeChangeMultisigOpts),
 
+    /// Propose adding a new owner to the set of owners of this multisig.
+    ProposeAddOwner(ProposeOwnerMultisigOpts),
+
+    /// Propose revoking an owner from the set of owners of this multisig.
+    ProposeRevokeOwner(ProposeOwnerMultisigOpts),
+
+    /// Propose setting the upgrade authority of a program to another address.
+    SetUpgradeAuthority(SetUpgradeAuthorityOpts),
+
     /// Approve a proposed transaction.
     Approve(ApproveOpts),
 
@@ -128,17 +142,11 @@ pub fn main(config: &mut SnapshotClientConfig, multisig_opts: MultisigOpts) {
         }
         SubCommand::ShowTransaction(cmd_opts) => {
             let result = config.with_snapshot(|config| {
-                let anker_program_id = if cmd_opts.anker_program_id() == &Pubkey::default() {
-                    None
-                } else {
-                    Some(*cmd_opts.anker_program_id())
-                };
                 show_transaction(
                     config,
                     cmd_opts.transaction_address(),
                     cmd_opts.multisig_program_id(),
                     cmd_opts.solido_program_id(),
-                    anker_program_id,
                 )
             });
             let output = result.ok_or_abort_with("Failed to read multisig.");
@@ -154,10 +162,26 @@ pub fn main(config: &mut SnapshotClientConfig, multisig_opts: MultisigOpts) {
             let output = result.ok_or_abort_with("Failed to propose multisig change.");
             print_output(output_mode, &output);
         }
+        SubCommand::ProposeAddOwner(cmd_opts) => {
+            let result = config.with_snapshot(|config| propose_add_owner(config, &cmd_opts));
+            let output = result.ok_or_abort_with("Failed to propose addition.");
+            print_output(output_mode, &output);
+        }
+        SubCommand::ProposeRevokeOwner(cmd_opts) => {
+            let result = config.with_snapshot(|config| propose_revoke_owner(config, &cmd_opts));
+            let output = result.ok_or_abort_with("Failed to propose revocation.");
+            print_output(output_mode, &output);
+        }
+        SubCommand::SetUpgradeAuthority(cmd_opts) => {
+            let result =
+                config.with_snapshot(|config| propose_set_upgrade_authority(config, &cmd_opts));
+            let output = result.ok_or_abort_with("Failed to set upgrade authority.");
+            print_output(output_mode, &output);
+        }
         SubCommand::Approve(cmd_opts) => {
             let result = approve(
                 config,
-                cmd_opts.transaction_address(),
+                &[*cmd_opts.transaction_address()],
                 cmd_opts.multisig_program_id(),
                 cmd_opts.multisig_address(),
             );
@@ -384,10 +408,8 @@ enum ParsedInstruction {
         new_owners: Vec<Pubkey>,
     },
     SolidoInstruction(SolidoInstruction),
-    AnkerInstruction(AnkerInstruction),
     TokenInstruction(TokenInstruction),
     InvalidSolidoInstruction,
-    InvalidAnkerInstruction,
     Unrecognized,
 }
 
@@ -412,6 +434,8 @@ enum SolidoInstruction {
 
         #[serde(serialize_with = "serialize_b58")]
         validator_vote_account: Pubkey,
+
+        validator_index: u32,
     },
     AddMaintainer {
         #[serde(serialize_with = "serialize_b58")]
@@ -432,6 +456,8 @@ enum SolidoInstruction {
 
         #[serde(serialize_with = "serialize_b58")]
         maintainer: Pubkey,
+
+        maintainer_index: u32,
     },
     ChangeRewardDistribution {
         current_solido: Box<Lido>,
@@ -445,54 +471,35 @@ enum SolidoInstruction {
 
         fee_recipients: FeeRecipients,
     },
-    SetMaxValidationCommission {
+    ChangeCriteria {
         #[serde(serialize_with = "serialize_b58")]
         solido_instance: Pubkey,
 
+        criteria: Criteria,
+
+        #[serde(serialize_with = "serialize_b58")]
+        manager: Pubkey,
+    },
+    MigrateStateToV2 {
+        #[serde(serialize_with = "serialize_b58")]
+        solido_instance: Pubkey,
+
+        #[serde(serialize_with = "serialize_b58")]
+        manager: Pubkey,
+
+        #[serde(serialize_with = "serialize_b58")]
+        validator_list: Pubkey,
+
+        #[serde(serialize_with = "serialize_b58")]
+        maintainer_list: Pubkey,
+
+        #[serde(serialize_with = "serialize_b58")]
+        developer_account: Pubkey,
+
+        reward_distribution: RewardDistribution,
+        max_validators: u32,
+        max_maintainers: u32,
         max_commission_percentage: u8,
-
-        #[serde(serialize_with = "serialize_b58")]
-        manager: Pubkey,
-    },
-}
-
-#[allow(clippy::enum_variant_names)]
-#[derive(Serialize)]
-enum AnkerInstruction {
-    ChangeTerraRewardsDestination {
-        #[serde(serialize_with = "serialize_b58")]
-        anker_instance: Pubkey,
-
-        #[serde(serialize_with = "serialize_b58")]
-        manager: Pubkey,
-
-        old_terra_rewards_destination: TerraAddress,
-
-        new_terra_rewards_destination: TerraAddress,
-    },
-    ChangeTokenSwapPool {
-        #[serde(serialize_with = "serialize_b58")]
-        anker_instance: Pubkey,
-
-        #[serde(serialize_with = "serialize_b58")]
-        manager: Pubkey,
-
-        #[serde(serialize_with = "serialize_b58")]
-        old_token_swap_pool: Pubkey,
-
-        #[serde(serialize_with = "serialize_b58")]
-        new_token_swap_pool: Pubkey,
-    },
-    ChangeSellRewardsMinOutBps {
-        #[serde(serialize_with = "serialize_b58")]
-        anker_instance: Pubkey,
-
-        #[serde(serialize_with = "serialize_b58")]
-        manager: Pubkey,
-
-        old_sell_rewards_min_out_bps: u64,
-
-        new_sell_rewards_min_out_bps: u64,
     },
 }
 
@@ -616,11 +623,13 @@ impl fmt::Display for ShowTransactionOutput {
                         solido_instance,
                         manager,
                         validator_vote_account,
+                        validator_index,
                     } => {
                         writeln!(f, "It deactivates a validator.")?;
                         writeln!(f, "    Solido instance:        {}", solido_instance)?;
                         writeln!(f, "    Manager:                {}", manager)?;
                         writeln!(f, "    Validator vote account: {}", validator_vote_account)?;
+                        writeln!(f, "    Validator index:        {}", validator_index)?;
                     }
                     SolidoInstruction::AddMaintainer {
                         solido_instance,
@@ -636,11 +645,13 @@ impl fmt::Display for ShowTransactionOutput {
                         solido_instance,
                         manager,
                         maintainer,
+                        maintainer_index,
                     } => {
                         writeln!(f, "It removes a maintainer")?;
-                        writeln!(f, "    Solido instance: {}", solido_instance)?;
-                        writeln!(f, "    Manager:         {}", manager)?;
-                        writeln!(f, "    Maintainer:      {}", maintainer)?;
+                        writeln!(f, "    Solido instance:  {}", solido_instance)?;
+                        writeln!(f, "    Manager:          {}", manager)?;
+                        writeln!(f, "    Maintainer:       {}", maintainer)?;
+                        writeln!(f, "    Maintainer index: {}", maintainer_index)?;
                     }
                     SolidoInstruction::ChangeRewardDistribution {
                         current_solido,
@@ -656,19 +667,55 @@ impl fmt::Display for ShowTransactionOutput {
                         print_changed_reward_distribution(f, current_solido, reward_distribution)?;
                         print_changed_recipients(f, current_solido, fee_recipients)?;
                     }
-                    SolidoInstruction::SetMaxValidationCommission {
+                    SolidoInstruction::ChangeCriteria {
                         solido_instance,
-                        max_commission_percentage,
+                        criteria,
                         manager,
                     } => {
-                        writeln!(f, "It sets the maximum validation commission")?;
+                        writeln!(f, "It sets the curation criteria")?;
                         writeln!(f, "    Solido instance:    {}", solido_instance)?;
                         writeln!(f, "    Manager:            {}", manager)?;
+                        writeln!(
+                            f,
+                            "    Max commission for validators: {}%",
+                            criteria.max_commission,
+                        )?;
+                        writeln!(
+                            f,
+                            "    Min vote success rate: {}%",
+                            criteria.min_vote_success_rate,
+                        )?;
+                        writeln!(
+                            f,
+                            "    Min block production rate: {}%",
+                            criteria.min_block_production_rate,
+                        )?;
+                    }
+                    SolidoInstruction::MigrateStateToV2 {
+                        solido_instance,
+                        manager,
+                        validator_list,
+                        maintainer_list,
+                        developer_account,
+                        reward_distribution,
+                        max_validators,
+                        max_maintainers,
+                        max_commission_percentage,
+                    } => {
+                        writeln!(f, "It migrates Lido state to a version 2")?;
+                        writeln!(f, "    Solido instance:           {}", solido_instance)?;
+                        writeln!(f, "    Manager:                   {}", manager)?;
+                        writeln!(f, "    Validator list:            {}", validator_list)?;
+                        writeln!(f, "    Maintainer list:           {}", maintainer_list)?;
+                        writeln!(f, "    Developer account:         {}", developer_account)?;
+                        writeln!(f, "    Max validators:            {}", max_validators)?;
+                        writeln!(f, "    Max maintainers:           {}", max_maintainers)?;
                         writeln!(
                             f,
                             "    Max validation commission: {}%",
                             max_commission_percentage
                         )?;
+                        writeln!(f, "    {:?}", reward_distribution)?;
                     }
                 }
             }
@@ -717,66 +764,6 @@ impl fmt::Display for ShowTransactionOutput {
                         writeln!(f, "The instruction is currently unsupported.")?;
                     }
                 }
-            }
-            ParsedInstruction::AnkerInstruction(anker_instruction) => match anker_instruction {
-                AnkerInstruction::ChangeTerraRewardsDestination {
-                    anker_instance,
-                    manager,
-                    old_terra_rewards_destination,
-                    new_terra_rewards_destination,
-                } => {
-                    writeln!(f, "It changes the Terra rewards destination in Anker")?;
-                    writeln!(f, "    Anker instance:                {}", anker_instance)?;
-                    writeln!(f, "    Manager:                       {}", manager)?;
-                    writeln!(
-                        f,
-                        "    Old Terra rewards destination: {}",
-                        old_terra_rewards_destination
-                    )?;
-                    writeln!(
-                        f,
-                        "    New Terra rewards destination: {}",
-                        new_terra_rewards_destination
-                    )?;
-                }
-                AnkerInstruction::ChangeTokenSwapPool {
-                    anker_instance,
-                    manager,
-                    old_token_swap_pool,
-                    new_token_swap_pool,
-                } => {
-                    writeln!(f, "It changes the Token Swap Pool in Anker")?;
-                    writeln!(f, "    Anker instance:      {}", anker_instance)?;
-                    writeln!(f, "    Manager:             {}", manager)?;
-                    writeln!(f, "    Old Token Swap Pool: {}", old_token_swap_pool)?;
-                    writeln!(f, "    New Token Swap Pool: {}", new_token_swap_pool)?;
-                }
-                AnkerInstruction::ChangeSellRewardsMinOutBps {
-                    anker_instance,
-                    manager,
-                    old_sell_rewards_min_out_bps,
-                    new_sell_rewards_min_out_bps,
-                } => {
-                    writeln!(f, "It changes the sell rewards min bps in Anker")?;
-                    writeln!(f, "    Anker instance:           {}", anker_instance)?;
-                    writeln!(f, "    Manager:                  {}", manager)?;
-                    writeln!(
-                        f,
-                        "    Old sell rewards min bps: {}",
-                        old_sell_rewards_min_out_bps
-                    )?;
-                    writeln!(
-                        f,
-                        "    New sell rewards min bps: {}",
-                        new_sell_rewards_min_out_bps
-                    )?;
-                }
-            },
-            ParsedInstruction::InvalidAnkerInstruction => {
-                writeln!(
-                    f,
-                    "  Tried to deserialize an Anker instruction, but failed."
-                )?;
             }
         }
 
@@ -919,7 +906,6 @@ fn show_transaction(
     transaction_address: &Pubkey,
     multisig_program_id: &Pubkey,
     solido_program_id: &Pubkey,
-    anker_program_id: Option<Pubkey>,
 ) -> Result<ShowTransactionOutput> {
     let transaction: serum_multisig::Transaction =
         config.client.get_account_deserialize(transaction_address)?;
@@ -1018,19 +1004,6 @@ fn show_transaction(
                 ParsedInstruction::InvalidSolidoInstruction
             }
         }
-    } else if anker_program_id == Some(instr.program_id) {
-        match try_parse_anker_instruction(config, &instr) {
-            Ok(instr) => instr,
-            Err(SnapshotError::MissingAccount) => return Err(SnapshotError::MissingAccount),
-            Err(SnapshotError::MissingValidatorIdentity(addr)) => {
-                return Err(SnapshotError::MissingValidatorIdentity(addr))
-            }
-            Err(SnapshotError::OtherError(err)) => {
-                println!("Warning: Failed to parse Anker instruction.");
-                err.print_pretty();
-                ParsedInstruction::InvalidAnkerInstruction
-            }
-        }
     } else {
         ParsedInstruction::Unrecognized
     };
@@ -1075,38 +1048,57 @@ fn try_parse_solido_instruction(
                 validator_vote_account: accounts.validator_vote_account,
             })
         }
-        LidoInstruction::DeactivateValidator => {
-            let accounts = DeactivateValidatorMeta::try_from_slice(&instr.accounts)?;
+        LidoInstruction::DeactivateValidatorV2 { validator_index } => {
+            let accounts = DeactivateValidatorMetaV2::try_from_slice(&instr.accounts)?;
             ParsedInstruction::SolidoInstruction(SolidoInstruction::DeactivateValidator {
                 solido_instance: accounts.lido,
                 manager: accounts.manager,
                 validator_vote_account: accounts.validator_vote_account_to_deactivate,
+                validator_index,
             })
         }
-        LidoInstruction::AddMaintainer => {
-            let accounts = AddMaintainerMeta::try_from_slice(&instr.accounts)?;
+        LidoInstruction::AddMaintainerV2 => {
+            let accounts = AddMaintainerMetaV2::try_from_slice(&instr.accounts)?;
             ParsedInstruction::SolidoInstruction(SolidoInstruction::AddMaintainer {
                 solido_instance: accounts.lido,
                 manager: accounts.manager,
                 maintainer: accounts.maintainer,
             })
         }
-        LidoInstruction::RemoveMaintainer => {
-            let accounts = RemoveMaintainerMeta::try_from_slice(&instr.accounts)?;
+        LidoInstruction::RemoveMaintainerV2 { maintainer_index } => {
+            let accounts = RemoveMaintainerMetaV2::try_from_slice(&instr.accounts)?;
             ParsedInstruction::SolidoInstruction(SolidoInstruction::RemoveMaintainer {
                 solido_instance: accounts.lido,
                 manager: accounts.manager,
                 maintainer: accounts.maintainer,
+                maintainer_index,
             })
         }
-        LidoInstruction::SetMaxValidationCommission {
+        LidoInstruction::ChangeCriteria { new_criteria } => {
+            let accounts = ChangeCriteriaMeta::try_from_slice(&instr.accounts)?;
+            ParsedInstruction::SolidoInstruction(SolidoInstruction::ChangeCriteria {
+                solido_instance: accounts.lido,
+                criteria: new_criteria,
+                manager: accounts.manager,
+            })
+        }
+        LidoInstruction::MigrateStateToV2 {
+            reward_distribution,
+            max_validators,
+            max_maintainers,
             max_commission_percentage,
         } => {
-            let accounts = SetMaxValidationCommissionMeta::try_from_slice(&instr.accounts)?;
-            ParsedInstruction::SolidoInstruction(SolidoInstruction::SetMaxValidationCommission {
+            let accounts = MigrateStateToV2Meta::try_from_slice(&instr.accounts)?;
+            ParsedInstruction::SolidoInstruction(SolidoInstruction::MigrateStateToV2 {
                 solido_instance: accounts.lido,
-                max_commission_percentage,
                 manager: accounts.manager,
+                validator_list: accounts.validator_list,
+                maintainer_list: accounts.maintainer_list,
+                developer_account: accounts.developer_account,
+                reward_distribution,
+                max_validators,
+                max_maintainers,
+                max_commission_percentage,
             })
         }
 
@@ -1138,51 +1130,6 @@ fn try_parse_token_instruction(
             TokenInstruction::Unsupported,
         )),
     }
-}
-
-fn try_parse_anker_instruction(
-    config: &mut SnapshotConfig,
-    instr: &Instruction,
-) -> Result<ParsedInstruction> {
-    let instruction: anker::instruction::AnkerInstruction =
-        BorshDeserialize::deserialize(&mut instr.data.as_slice())?;
-    Ok(match instruction {
-        anker::instruction::AnkerInstruction::ChangeTerraRewardsDestination {
-            terra_rewards_destination,
-        } => {
-            let accounts =
-                ChangeTerraRewardsDestinationAccountsMeta::try_from_slice(&instr.accounts)?;
-            let current_anker = config.client.get_anker(&accounts.anker)?;
-            ParsedInstruction::AnkerInstruction(AnkerInstruction::ChangeTerraRewardsDestination {
-                anker_instance: accounts.anker,
-                manager: accounts.manager,
-                old_terra_rewards_destination: current_anker.terra_rewards_destination,
-                new_terra_rewards_destination: terra_rewards_destination,
-            })
-        }
-        anker::instruction::AnkerInstruction::ChangeTokenSwapPool => {
-            let accounts = ChangeTokenSwapPoolAccountsMeta::try_from_slice(&instr.accounts)?;
-            ParsedInstruction::AnkerInstruction(AnkerInstruction::ChangeTokenSwapPool {
-                anker_instance: accounts.anker,
-                manager: accounts.manager,
-                old_token_swap_pool: accounts.current_token_swap_pool,
-                new_token_swap_pool: accounts.new_token_swap_pool,
-            })
-        }
-        anker::instruction::AnkerInstruction::ChangeSellRewardsMinOutBps {
-            sell_rewards_min_out_bps,
-        } => {
-            let accounts = ChangeSellRewardsMinOutBpsAccountsMeta::try_from_slice(&instr.accounts)?;
-            let current_anker = config.client.get_anker(&accounts.anker)?;
-            ParsedInstruction::AnkerInstruction(AnkerInstruction::ChangeSellRewardsMinOutBps {
-                anker_instance: accounts.anker,
-                manager: accounts.manager,
-                old_sell_rewards_min_out_bps: current_anker.sell_rewards_min_out_bps,
-                new_sell_rewards_min_out_bps: sell_rewards_min_out_bps,
-            })
-        }
-        _ => ParsedInstruction::InvalidAnkerInstruction,
-    })
 }
 
 #[derive(Serialize)]
@@ -1231,7 +1178,7 @@ pub fn propose_instruction(
     let dummy_tx = serum_multisig::Transaction {
         multisig: multisig_address,
         program_id: instruction.program_id,
-        accounts,
+        accounts: accounts.clone(),
         data: instruction.data.clone(),
         signers: multisig
             .owners
@@ -1263,15 +1210,6 @@ pub fn propose_instruction(
         tx_account_size as u64,
         multisig_program_id,
     );
-
-    // The Multisig program expects `serum_multisig::TransactionAccount` instead
-    // of `solana_sdk::AccountMeta`. The types are structurally identical,
-    // but not nominally, so we need to convert these.
-    let accounts: Vec<_> = instruction
-        .accounts
-        .iter()
-        .map(serum_multisig::TransactionAccount::from)
-        .collect();
 
     let multisig_accounts = multisig_accounts::CreateTransaction {
         multisig: multisig_address,
@@ -1364,52 +1302,146 @@ fn propose_change_multisig(
     )
 }
 
+fn propose_revoke_owner(
+    config: &mut SnapshotConfig,
+    opts: &ProposeOwnerMultisigOpts,
+) -> Result<ProposeInstructionOutput> {
+    let multisig: serum_multisig::Multisig = config
+        .client
+        .get_account_deserialize(opts.multisig_address())?;
+
+    let (program_derived_address, _nonce) =
+        get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
+
+    let new_owners: Vec<_> = multisig
+        .owners
+        .iter()
+        .filter(|&owner| owner != opts.owner())
+        .cloned()
+        .collect();
+
+    let change_data = multisig_instruction::SetOwnersAndChangeThreshold {
+        owners: new_owners,
+        threshold: multisig.threshold,
+    };
+    let change_addrs = multisig_accounts::Auth {
+        multisig: *opts.multisig_address(),
+        multisig_signer: program_derived_address,
+    };
+
+    let override_is_signer = None;
+    let change_instruction = Instruction {
+        program_id: *opts.multisig_program_id(),
+        data: change_data.data(),
+        accounts: change_addrs.to_account_metas(override_is_signer),
+    };
+
+    propose_instruction(
+        config,
+        opts.multisig_program_id(),
+        *opts.multisig_address(),
+        change_instruction,
+    )
+}
+
+fn propose_add_owner(
+    config: &mut SnapshotConfig,
+    opts: &ProposeOwnerMultisigOpts,
+) -> Result<ProposeInstructionOutput> {
+    let multisig: serum_multisig::Multisig = config
+        .client
+        .get_account_deserialize(opts.multisig_address())?;
+
+    let (program_derived_address, _nonce) =
+        get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
+
+    let new_owners: Vec<_> = multisig
+        .owners
+        .iter()
+        .chain(std::iter::once(opts.owner()))
+        .cloned()
+        .collect();
+
+    let change_data = multisig_instruction::SetOwnersAndChangeThreshold {
+        owners: new_owners,
+        threshold: multisig.threshold,
+    };
+    let change_addrs = multisig_accounts::Auth {
+        multisig: *opts.multisig_address(),
+        multisig_signer: program_derived_address,
+    };
+
+    let override_is_signer = None;
+    let change_instruction = Instruction {
+        program_id: *opts.multisig_program_id(),
+        data: change_data.data(),
+        accounts: change_addrs.to_account_metas(override_is_signer),
+    };
+
+    propose_instruction(
+        config,
+        opts.multisig_program_id(),
+        *opts.multisig_address(),
+        change_instruction,
+    )
+}
+
 #[derive(Serialize)]
 struct ApproveOutput {
     pub transaction_id: Signature,
-    pub num_approvals: u64,
+    pub sub_transactions: Vec<Pubkey>,
+    pub num_approvals: Vec<u64>,
     pub threshold: u64,
 }
 
 impl fmt::Display for ApproveOutput {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "Transaction approved.")?;
+        writeln!(f, "Transactions approved.")?;
         writeln!(
             f,
             "Solana transaction id of approval: {}",
             self.transaction_id
         )?;
-        writeln!(
-            f,
-            "Multisig transaction now has {} out of {} required approvals.",
-            self.num_approvals, self.threshold,
-        )?;
+
+        for (sub_transaction, num_approvals) in
+            self.sub_transactions.iter().zip(&self.num_approvals)
+        {
+            writeln!(
+                f,
+                "Multisig transaction {} now has {} out of {} required approvals.",
+                sub_transaction, num_approvals, self.threshold,
+            )?;
+        }
         Ok(())
     }
 }
 
 fn approve(
     config: &mut SnapshotClientConfig,
-    transaction_address: &Pubkey,
+    transactions: &[Pubkey],
     multisig_program_id: &Pubkey,
     multisig_address: &Pubkey,
 ) -> std::result::Result<ApproveOutput, crate::Error> {
     // First, do the actual approval.
     let signature = config.with_snapshot(|config| {
-        let approve_accounts = multisig_accounts::Approve {
-            multisig: *multisig_address,
-            transaction: *transaction_address,
-            // The owner that signs the multisig proposed transaction, should be
-            // the public key that signs the entire approval transaction (which
-            // is also the payer).
-            owner: config.signer.pubkey(),
-        };
-        let approve_instruction = Instruction {
-            program_id: *multisig_program_id,
-            data: multisig_instruction::Approve.data(),
-            accounts: approve_accounts.to_account_metas(None),
-        };
-        config.sign_and_send_transaction(&[approve_instruction], &[config.signer])
+        let mut instructions = vec![];
+        for transaction_address in transactions {
+            let approve_accounts = multisig_accounts::Approve {
+                multisig: *multisig_address,
+                transaction: *transaction_address,
+                // The owner that signs the multisig proposed transaction, should be
+                // the public key that signs the entire approval transaction (which
+                // is also the payer).
+                owner: config.signer.pubkey(),
+            };
+            let approve_instruction = Instruction {
+                program_id: *multisig_program_id,
+                data: multisig_instruction::Approve.data(),
+                accounts: approve_accounts.to_account_metas(None),
+            };
+            instructions.push(approve_instruction);
+        }
+        config.sign_and_send_transaction(&instructions, &[config.signer])
     })?;
 
     // After a successful approval, query the new state of the transaction, so
@@ -1418,12 +1450,17 @@ fn approve(
         let multisig: serum_multisig::Multisig =
             config.client.get_account_deserialize(multisig_address)?;
 
-        let transaction: serum_multisig::Transaction =
-            config.client.get_account_deserialize(transaction_address)?;
+        let mut num_approvals = vec![];
+        for transaction_address in transactions {
+            let transaction: serum_multisig::Transaction =
+                config.client.get_account_deserialize(transaction_address)?;
+            num_approvals.push(transaction.signers.iter().filter(|x| **x).count() as u64);
+        }
 
         let result = ApproveOutput {
             transaction_id: signature,
-            num_approvals: transaction.signers.iter().filter(|x| **x).count() as u64,
+            num_approvals,
+            sub_transactions: transactions.to_vec(),
             threshold: multisig.threshold,
         };
 
@@ -1447,103 +1484,134 @@ fn approve_batch(
         OutputMode::Text => { /* This is fine. */ }
     }
 
+    // If not interactive will execute transactions in chunks
+    const CHUNK_SIZE: usize = 70;
+
     let transaction_addresses = std::fs::read_to_string(opts.transaction_addresses_path())
         .expect("Failed to read transaction addresses from file.");
-    for (i, line) in transaction_addresses.lines().enumerate() {
-        // Take the first word from the line; the remainder can contain a comment
-        // about what the transaction is for.
-        match line
-            .split_ascii_whitespace()
-            .next()
-            .and_then(|addr_str| Pubkey::from_str(addr_str).ok())
-        {
-            Some(addr) => {
-                // Now that we know the transaction address is valid, print the
-                // full line, to preserve any trailing content. (But trim the
-                // newline, println already adds one.)
-                println!("\nTransaction {}", line.trim());
-                approve_transaction_interactive(config, opts, &addr)?;
-            }
-            None => {
-                println!("\nInvalid transaction address on line {}, skipping.", i + 1);
+    for (i, chunk) in transaction_addresses
+        .lines()
+        .chunks(CHUNK_SIZE)
+        .into_iter()
+        .enumerate()
+    {
+        let mut transactions = vec![];
+        for (j, line) in chunk.enumerate() {
+            // Take the first word from the line; the remainder can contain a comment
+            // about what the transaction is for.
+            match line
+                .split_ascii_whitespace()
+                .next()
+                .and_then(|addr_str| Pubkey::from_str(addr_str).ok())
+            {
+                Some(addr) => {
+                    // Now that we know the transaction address is valid, print the
+                    // full line, to preserve any trailing content. (But trim the
+                    // newline, println already adds one.)
+                    transactions.push(addr);
+                }
+                None => {
+                    println!(
+                        "\nInvalid transaction address on line {}, skipping.",
+                        i * CHUNK_SIZE + j + 1
+                    );
+                }
             }
         }
+        approve_transactions(config, opts, &transactions)?;
     }
 
     Ok(())
 }
 
-/// Prompt the user to enter 'Y' or 'N'.
+/// Prompt the user to enter Yes or No.
 fn ask_user_y_n(prompt: &'static str) -> bool {
     use std::io::{BufRead, Write};
-    let mut buf = String::new();
+
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut input = String::new();
+
     loop {
         print!("{} [Y/N] ", prompt);
-        std::io::stdout()
+        stdout.flush().expect("Failed to flush to stdout.");
+
+        input.clear();
+        let _ = stdin
             .lock()
-            .flush()
-            .expect("Failed to flush to stdout.");
-        std::io::stdin()
-            .lock()
-            .read_line(&mut buf)
+            .read_line(&mut input)
             .expect("Failed to read from stdin.");
 
-        match &buf[..] {
-            "Y\n" => return true,
-            "N\n" => return false,
-            _ => {
-                println!("Please enter the character 'Y' or 'N' (case-sensitive).");
-                buf.clear();
-            }
+        let input = input.trim().to_lowercase();
+
+        match input {
+            _ if input.starts_with('y') => return true,
+            _ if input.starts_with('n') => return false,
+            _ => println!("Please enter `y` or `n`."),
         }
     }
 }
 
-fn approve_transaction_interactive(
+/// Approve and execute transactions interactively or not.
+/// Will execute transaction if not interactive.
+fn approve_transactions(
     config: &mut SnapshotClientConfig,
     opts: &ApproveBatchOpts,
-    transaction_address: &Pubkey,
+    transactions: &[Pubkey],
 ) -> std::result::Result<(), crate::Error> {
-    config.with_snapshot(|config| {
-        let output = show_transaction(
+    if *opts.silent() {
+        let approve_result = approve(
             config,
-            transaction_address,
+            transactions,
             opts.multisig_program_id(),
-            opts.solido_program_id(),
-            None,
+            opts.multisig_address(),
         )?;
-        println!("{}", output);
-        Ok(())
-    })?;
-
-    if !ask_user_y_n("Sign and submit approval transaction?") {
-        println!(
-            "Not approving transaction {}, continuing with next transaction if any.",
-            transaction_address
-        );
+        println!("{}", approve_result);
         return Ok(());
     }
 
-    let approve_result = approve(
-        config,
-        transaction_address,
-        opts.multisig_program_id(),
-        opts.multisig_address(),
-    )?;
-    println!("{}", approve_result);
-
-    let can_execute = approve_result.num_approvals >= approve_result.threshold;
-    if can_execute && ask_user_y_n("Transaction can be executed, sign and submit execution?") {
+    for transaction_address in transactions {
+        println!("\nTransaction {}", transaction_address);
         config.with_snapshot(|config| {
-            let execute_result = execute_transaction(
+            let output = show_transaction(
                 config,
                 transaction_address,
                 opts.multisig_program_id(),
-                opts.multisig_address(),
+                opts.solido_program_id(),
             )?;
-            println!("{}", execute_result);
+            println!("{}", output);
             Ok(())
         })?;
+
+        if !ask_user_y_n("Sign and submit approval transaction?") {
+            println!(
+                "Not approving transaction {}, continuing with next transaction if any.",
+                transaction_address
+            );
+            return Ok(());
+        }
+
+        let approve_result = approve(
+            config,
+            &[*transaction_address],
+            opts.multisig_program_id(),
+            opts.multisig_address(),
+        )?;
+        println!("{}", approve_result);
+
+        let can_execute = approve_result.num_approvals[0] >= approve_result.threshold;
+        if can_execute && ask_user_y_n("Transaction can be executed, sign and submit execution?") {
+            config.with_snapshot(|config| {
+                let execute_result = execute_transaction(
+                    config,
+                    transaction_address,
+                    opts.multisig_program_id(),
+                    opts.multisig_address(),
+                )?;
+                println!("{}", execute_result);
+                Ok(())
+            })?;
+        }
     }
 
     Ok(())
@@ -1643,6 +1711,7 @@ fn execute_transaction(
     Ok(result)
 }
 
+/// Transfer tokens from a multisig account to another account.
 fn transfer_token(
     config: &mut SnapshotConfig,
     opts: &TransferTokenOpts,
@@ -1658,6 +1727,28 @@ fn transfer_token(
         &[],
         *opts.amount(),
     )?;
+    propose_instruction(
+        config,
+        opts.multisig_program_id(),
+        *opts.multisig_address(),
+        instruction,
+    )
+}
+
+/// Set new upgrade authority for a program.
+fn propose_set_upgrade_authority(
+    config: &mut SnapshotConfig,
+    opts: &SetUpgradeAuthorityOpts,
+) -> Result<ProposeInstructionOutput> {
+    let (program_derived_address, _nonce) =
+        get_multisig_program_address(opts.multisig_program_id(), opts.multisig_address());
+
+    let instruction = set_upgrade_authority(
+        opts.program_id(),
+        &program_derived_address,
+        Some(opts.new_authority()),
+    );
+
     propose_instruction(
         config,
         opts.multisig_program_id(),

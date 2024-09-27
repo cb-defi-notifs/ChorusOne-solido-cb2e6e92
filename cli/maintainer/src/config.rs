@@ -11,11 +11,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use solana_sdk::pubkey::{ParsePubkeyError, Pubkey};
 
-use anker::token::BLamports;
-use anker::wormhole::TerraAddress;
 use lido::token::Lamports;
 use lido::token::StLamports;
-use solido_cli_common::snapshot::OutputMode;
+use solido_cli_common::{per64::parse_from_fractional_percentage, snapshot::OutputMode};
 
 pub fn get_option_from_config<T: FromStr>(
     name: &'static str,
@@ -189,7 +187,13 @@ pub struct ConfigFile {
 }
 
 pub fn read_config(config_path: &Path) -> ConfigFile {
-    let file_content = std::fs::read(config_path).expect("Failed to open config file.");
+    let file_content = match std::fs::read(config_path) {
+        Ok(content) => content,
+        Err(err) => {
+            eprintln!("{}: {:?}.", err, config_path);
+            std::process::exit(0x0100);
+        }
+    };
     let values: Value = serde_json::from_slice(&file_content).expect("Error while reading config.");
     ConfigFile { values }
 }
@@ -249,8 +253,20 @@ cli_opt_struct! {
         max_maintainers: u32,
 
         /// The maximum validator fee a validator can have to be accepted by protocol.
-        #[clap(long, value_name = "int")]
-        max_commission_percentage: u8,
+        #[clap(long, value_name = "percentage")]
+        max_commission: u8,
+
+        /// The minimum vote success rate a validator must have to not be deactivated.
+        #[clap(long, value_name = "percentage", value_parser = parse_from_fractional_percentage)]
+        min_vote_success_rate: u64,
+
+        /// The minimum block production rate a validator must have to not be deactivated.
+        #[clap(long, value_name = "percentage", value_parser = parse_from_fractional_percentage)]
+        min_block_production_rate: u64,
+
+        /// The minimum block production rate a validator must have to not be deactivated.
+        #[clap(long, value_name = "percentage", value_parser = parse_from_fractional_percentage)]
+        min_uptime: u64,
 
         // See also the docs section of `create-solido` in main.rs for a description
         // of the fee shares.
@@ -283,6 +299,21 @@ cli_opt_struct! {
         /// will be created.
         #[clap(long)]
         solido_key_path: PathBuf => PathBuf::default(),
+
+        /// Optional argument for the validator list address, if not passed a random one
+        /// will be created.
+        #[clap(long)]
+        validator_list_key_path: PathBuf => PathBuf::default(),
+
+        /// Optional argument for the validator performance list address,
+        /// if not passed, a random one will be created.
+        #[clap(long)]
+        validator_perf_list_key_path: PathBuf => PathBuf::default(),
+
+        /// Optional argument for the maintainer list address, if not passed a random one
+        /// will be created.
+        #[clap(long)]
+        maintainer_list_key_path: PathBuf => PathBuf::default(),
 
         /// Used to compute Solido's manager. Multisig instance.
         #[clap(long, value_name = "address")]
@@ -374,6 +405,18 @@ cli_opt_struct! {
 }
 
 cli_opt_struct! {
+    DeactivateIfViolatesOpts {
+        /// Address of the Solido program.
+        #[clap(long, value_name = "address")]
+        solido_program_id: Pubkey,
+
+        /// Account that stores the data for this Solido instance.
+        #[clap(long, value_name = "address")]
+        solido_address: Pubkey,
+    }
+}
+
+cli_opt_struct! {
     AddRemoveMaintainerOpts {
         /// Address of the Solido program.
         #[clap(long, value_name = "address")]
@@ -420,26 +463,10 @@ cli_opt_struct! {
 }
 
 cli_opt_struct! {
-    ShowAnkerAuthoritiesOpts {
-        /// The Solido instance, used to derive the Anker instance.
-        #[clap(long, value_name = "address")]
-        solido_address: Pubkey,
-
-        /// Address of the Anker program.
-        #[clap(long, value_name = "address")]
-        anker_program_id: Pubkey,
-   }
-}
-
-cli_opt_struct! {
     PerformMaintenanceOpts {
         /// Address of the Solido program.
         #[clap(long, value_name = "address")]
         solido_program_id: Pubkey,
-
-        /// Address of the Anker program.
-        #[clap(long, value_name = "address")]
-        anker_program_id: Pubkey => Pubkey::default(),
 
         /// Account that stores the data for this Solido instance.
         #[clap(long, value_name = "address")]
@@ -451,11 +478,17 @@ cli_opt_struct! {
         /// "anytime" option is only intended for testing purposes.
         #[clap(long, value_name = "anytime/only-near-epoch-end")]
         stake_time: StakeTime => StakeTime::OnlyNearEpochEnd,
+
+        /// Threshold for when to consider the end of an epoch.
+        /// E.g. if set to 95, the end of epoch would be considered if the system
+        /// is past 95% of the epoch's time.
+        #[clap(long)]
+        end_of_epoch_threshold: u8 => 95,
     }
 }
 
 cli_opt_struct! {
-    DeactivateValidatorIfCommissionExceedsMaxOpts {
+    ChangeCriteriaOpts {
         /// Address of the Solido program.
         #[clap(long, value_name = "address")]
         solido_program_id: Pubkey,
@@ -463,11 +496,35 @@ cli_opt_struct! {
         /// Account that stores the data for this Solido instance.
         #[clap(long, value_name = "address")]
         solido_address: Pubkey,
+
+        /// Max percent of rewards a validator can receive (validation commission), in range `[0, 100]`.
+        #[clap(long, value_name = "percentage")]
+        max_commission: u8,
+
+        /// Min block production rate that a validator must uphold.
+        #[clap(long, value_name = "percentage", value_parser = parse_from_fractional_percentage)]
+        min_block_production_rate: u64,
+
+        /// Min vote success rate that a validator must uphold.
+        #[clap(long, value_name = "percentage", value_parser = parse_from_fractional_percentage)]
+        min_vote_success_rate: u64,
+
+        /// Min uptime that a validator must maintain.
+        #[clap(long, value_name = "percentage", value_parser = parse_from_fractional_percentage)]
+        min_uptime: u64,
+
+        /// Multisig instance.
+        #[clap(long, value_name = "address")]
+        multisig_address: Pubkey,
+
+        /// Address of the Multisig program.
+        #[clap(long, value_name = "address")]
+        multisig_program_id: Pubkey,
     }
 }
 
 cli_opt_struct! {
-    SetMaxValidationCommissionOpts {
+    RemoveValidatorOpts {
         /// Address of the Solido program.
         #[clap(long, value_name = "address")]
         solido_program_id: Pubkey,
@@ -476,9 +533,9 @@ cli_opt_struct! {
         #[clap(long, value_name = "address")]
         solido_address: Pubkey,
 
-        /// Max percent of rewards a validator can recieve (validation commission), in range [0, 100]
-        #[clap(long, value_name = "fee")]
-        max_commission_percentage: u8,
+        /// Address of the validator vote account.
+        #[clap(long, value_name = "address")]
+        validator_vote_account: Pubkey,
 
         /// Multisig instance.
         #[clap(long, value_name = "address")]
@@ -526,7 +583,7 @@ impl CreateMultisigOpts {
 }
 
 cli_opt_struct! {
-ProposeUpgradeOpts {
+    ProposeUpgradeOpts {
         /// The multisig account whose owners should vote for this proposal.
         #[clap(long, value_name = "address")]
         multisig_address: Pubkey,
@@ -550,7 +607,7 @@ ProposeUpgradeOpts {
 }
 
 cli_opt_struct! {
-ShowMultisigOpts {
+    ShowMultisigOpts {
         /// The multisig account to display.
         #[clap(long, value_name = "address")]
         multisig_address: Pubkey,
@@ -574,10 +631,6 @@ cli_opt_struct! {
         /// Address of the Multisig program.
         #[clap(long)]
         multisig_program_id: Pubkey,
-
-        /// Address of the Anker program.
-        #[clap(long, value_name = "address")]
-        anker_program_id: Pubkey => Pubkey::default(),
     }
 }
 
@@ -632,6 +685,10 @@ cli_opt_struct! {
         /// Address of the Solido program.
         #[clap(long)]
         solido_program_id: Pubkey,
+
+        /// Don't interactively ask to check each transaction before signing
+        #[clap(long, takes_value = false, action = clap::ArgAction::SetTrue)]
+        silent: bool
     }
 }
 
@@ -650,6 +707,42 @@ cli_opt_struct! {
         /// The public keys of the multisig owners, who can sign transactions.
         #[clap(long)]
         owners: PubkeyVec,
+
+        /// Address of the Multisig program.
+        #[clap(long)]
+        multisig_program_id: Pubkey,
+    }
+}
+
+cli_opt_struct! {
+    SetUpgradeAuthorityOpts {
+        /// The multisig account to modify.
+        #[clap(long)]
+        multisig_address: Pubkey,
+
+        /// Address of the Multisig program.
+        #[clap(long)]
+        multisig_program_id: Pubkey,
+
+        /// The deployed program to change the upgrade authority of.
+        #[clap(long)]
+        program_id: Pubkey,
+
+        /// The new authority to set.
+        #[clap(long)]
+        new_authority: Pubkey,
+    }
+}
+
+cli_opt_struct! {
+    ProposeOwnerMultisigOpts {
+        /// The multisig account to modify.
+        #[clap(long)]
+        multisig_address: Pubkey,
+
+        /// The public key of the new multisig owner to add or remove to this multisig address.
+        #[clap(long)]
+        owner: Pubkey,
 
         /// Address of the Multisig program.
         #[clap(long)]
@@ -681,10 +774,6 @@ cli_opt_struct! {
         #[clap(long)]
         solido_program_id: Pubkey,
 
-        /// Address of the Anker program.
-        #[clap(long, value_name = "address")]
-        anker_program_id: Pubkey => Pubkey::default(),
-
         /// Account that stores the data for this Solido instance.
         #[clap(long)]
         solido_address: Pubkey,
@@ -706,6 +795,12 @@ cli_opt_struct! {
         /// "anytime" option is only intended for testing purposes.
         #[clap(long, value_name = "anytime/only-near-epoch-end")]
         stake_time: StakeTime => StakeTime::OnlyNearEpochEnd,
+
+        /// Threshold for when to consider the end of an epoch.
+        /// E.g. if set to 95, the end of epoch would be considered if the system
+        /// is past 95% of the epoch's time.
+        #[clap(long)]
+        end_of_epoch_threshold: u8 => 95,
     }
 }
 
@@ -744,81 +839,6 @@ cli_opt_struct! {
 }
 
 cli_opt_struct! {
-    CreateAnkerOpts {
-        /// Address of the Solido program.
-        #[clap(long, value_name = "address")]
-        solido_program_id: Pubkey,
-
-        /// Account that stores the data for the underlying Solido instance.
-        #[clap(long, value_name = "address")]
-        solido_address: Pubkey,
-
-        /// Address of the Anker program.
-        #[clap(long, value_name = "address")]
-        anker_program_id: Pubkey,
-
-        /// Address of the Wormhole core bridge program.
-        #[clap(long, value_name = "address")]
-        wormhole_core_bridge_program_id: Pubkey,
-
-        /// Address of the Wormhole token bridge program.
-        #[clap(long, value_name = "address")]
-        wormhole_token_bridge_program_id: Pubkey,
-
-        /// Optionally the bSOL mint address. If not passed a random one will be created.
-        #[clap(long, value_name = "address")]
-        b_sol_mint_address: Pubkey,
-
-        /// The UST mint address.
-        ///
-        /// The mainnet address of Wormhole-v2 wrapped UST is
-        /// 9vMJfxuKxXBoEa7rM12mYLMwTacLMLDJqHozw96WQL8i.
-        #[clap(long, value_name = "address")]
-        ust_mint_address: Pubkey,
-
-        /// Orca (or other SPL token swap) pool used for stSOL/UST swap.
-        #[clap(long, value_name = "address")]
-        token_swap_pool: Pubkey,
-
-        /// Terra address that will receive the UST rewards.
-        ///
-        /// Must be provided in the usual Terra bech32 encoding.
-        #[clap(long, value_name = "terra_address")]
-        terra_rewards_address: TerraAddress,
-
-        /// Minimum fraction of the expected proceeds for which selling rewards is allowed, in basis points.
-        ///
-        /// To prevent rewards selling from being sandwiched, Anker tracks recent
-        /// prices of the pool. Based on the median of recent prices, it has an
-        /// "expected" amount of the proceeds. If the actual proceeds would be
-        /// lower than `sell_rewards_min_out_bps / 1e4` times the expected proceeds,
-        /// selling rewards is not allowed. Lower values allow more slippage and
-        /// sandwiching, higher values protect against this, but can make it more
-        /// difficult to sell rewards at times of high volatility. To allow 1%
-        /// slippage w.r.t. the expected price, set this value to 9900 bps.
-        ///
-        /// This fraction includes the swap fee. For example, if there is a 5%
-        /// swap fee, then this setting should be set to less than 9500, because
-        /// it is unlikely that the actual proceeds are more than 95% of the
-        /// expected proceeds. In other words, the expected proceeds do not take
-        /// the swap fee into account.
-        ///
-        /// NB: This means that values greater than 9999 will likely prevent
-        /// Anker from ever selling rewards.
-        #[clap(long, value_name = "basis points")]
-        sell_rewards_min_out_bps: u64,
-    }
-}
-
-cli_opt_struct! {
-    ShowAnkerOpts {
-        /// Address of the Anker instance.
-        #[clap(long, value_name = "address")]
-        anker_address: Pubkey,
-    }
-}
-
-cli_opt_struct! {
     CreateTokenPoolOpts {
         /// Program id of the token swap program.
         #[clap(long, value_name = "address")]
@@ -842,100 +862,64 @@ cli_opt_struct! {
 }
 
 cli_opt_struct! {
-    AnkerDepositOpts {
-        /// Address of the Anker instance.
+    CreateV2AccountsOpts {
+        /// Address of the Solido program
         #[clap(long, value_name = "address")]
-        anker_address: Pubkey,
+        solido_program_id: Pubkey,
 
-        /// stSOL SPL token account to send from.
-        ///
-        /// By default, the stSOL associated token account of the signer is used.
-        /// In any case, the signer must own this account.
+        /// stSol mint address, used to create SPL token developer account
         #[clap(long, value_name = "address")]
-        from_st_sol_address: Pubkey => Pubkey::default(),
+        st_sol_mint: Pubkey,
 
-        /// Amount to deposit, in stSOL, using . as decimal separator.
-        #[clap(long, value_name = "amount")]
-        amount_st_sol: StLamports,
+        /// Account who will own the stSOL SPL token account that receives the developer fees.
+        #[clap(long, value_name = "address")]
+        developer_account_owner: Pubkey,
     }
 }
 
 cli_opt_struct! {
-    AnkerWithdrawOpts {
-        /// Address of the Anker instance.
+    MigrateStateToV2Opts {
+        /// Address of the Solido program
         #[clap(long, value_name = "address")]
-        anker_address: Pubkey,
+        solido_program_id: Pubkey,
 
-        /// bSOL SPL token account from where we will remove the bSOL.
-        ///
-        /// By default, the bSOL associated token account of the signer is used.
-        /// In any case, the signer must own this account.
+        /// Solido address
         #[clap(long, value_name = "address")]
-        from_b_sol_address: Pubkey => Pubkey::default(),
+        solido_address: Pubkey,
 
-        /// stSOL SPL token account that will receive the stSOL.
-        ///
-        /// By default, the stSOL associated token account of the signer is used.
+        /// The maximum validator fee a validator can have to be accepted by protocol.
+        #[clap(long, value_name = "int")]
+        max_commission_percentage: u8,
+
+        // See also the docs section of `create-solido` in main.rs for a description
+        // of the fee shares.
+        /// Treasury fee share of the rewards.
+        #[clap(long, value_name = "int")]
+        treasury_fee_share: u32,
+
+        /// Developer fee share of the rewards.
+        #[clap(long, value_name = "int")]
+        developer_fee_share: u32,
+
+        /// Share of the rewards that goes to stSOL appreciation (the non-fee part).
+        #[clap(long, value_name = "int")]
+        st_sol_appreciation_share: u32,
+
+        /// Account who will receive stSOL developer fees.
         #[clap(long, value_name = "address")]
-        to_st_sol_address: Pubkey => Pubkey::default(),
+        developer_fee_address: Pubkey,
 
-        /// Amount to withdraw, in bSOL, using . as decimal separator.
-        #[clap(long, value_name = "amount")]
-        amount_b_sol: BLamports,
-    }
-}
-
-cli_opt_struct! {
-    AnkerChangeTerraRewardsDestinationOpts {
-        /// Address of the Anker instance.
-        #[clap(long, value_name = "address")]
-        anker_address: Pubkey,
-
-        /// New terra rewards address.
-        #[clap(long, value_name = "address")]
-        terra_rewards_destination: TerraAddress,
-
-        /// Multisig instance.
-        #[clap(long, value_name = "address")]
-        multisig_address: Pubkey,
-
-        /// Address of the Multisig program.
+        /// Validator list data address
         #[clap(long)]
-        multisig_program_id: Pubkey,
-    }
-}
+        validator_list_address: Pubkey,
 
-cli_opt_struct! {
-    AnkerChangeTokenSwapPoolOpts {
-        /// Address of the Anker instance.
-        #[clap(long, value_name = "address")]
-        anker_address: Pubkey,
-
-        /// New token swap pool address.
-        #[clap(long, value_name = "address")]
-        token_swap_pool: Pubkey,
-
-        /// Multisig instance.
-        #[clap(long, value_name = "address")]
-        multisig_address: Pubkey,
-
-        /// Address of the Multisig program.
+        /// Validator list data address
         #[clap(long)]
-        multisig_program_id: Pubkey,
-    }
-}
+        validator_perf_list_address: Pubkey,
 
-cli_opt_struct! {
-    AnkerChangeSellRewardsMinOutBpsOpts {
-        /// Address of the Anker instance.
-        #[clap(long, value_name = "address")]
-        anker_address: Pubkey,
-
-        /// New Anker's `sell_rewards_min_out_bps`.
-        //
-        // See also `anker create --sell-rewards-min-out-bps`.
-        #[clap(long, value_name = "basis points")]
-        sell_rewards_min_out_bps: u64,
+        /// Maintainer list data address
+        #[clap(long)]
+        maintainer_list_address: Pubkey,
 
         /// Multisig instance.
         #[clap(long, value_name = "address")]

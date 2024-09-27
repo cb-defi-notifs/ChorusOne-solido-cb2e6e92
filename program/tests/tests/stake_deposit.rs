@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: 2021 Chorus One AG
 // SPDX-License-Identifier: GPL-3.0
 
-use testlib::solido_context::{id, Context, StakeDeposit};
+use testlib::solido_context::{id, Context};
 use testlib::{assert_error_code, assert_solido_error};
 
 use lido::error::LidoError;
 use lido::processor::StakeType;
+use lido::state::{ListEntry, StakeDeposit};
 use lido::token::Lamports;
+use lido::MINIMUM_STAKE_ACCOUNT_BALANCE;
 use solana_program_test::tokio;
 use solana_sdk::signer::Signer;
 
@@ -20,7 +22,7 @@ async fn test_stake_deposit_append() {
 
     // Sanity check before we start: the validator should have zero balance in zero stake accounts.
     let solido_before = context.get_solido().await;
-    let validator_before = &solido_before.validators.entries[0].entry;
+    let validator_before = &solido_before.validators.entries[0];
     assert_eq!(validator_before.stake_accounts_balance, Lamports(0));
     assert_eq!(validator_before.stake_seeds.begin, 0);
     assert_eq!(validator_before.stake_seeds.end, 0);
@@ -46,7 +48,7 @@ async fn test_stake_deposit_append() {
     // has balance in a stake account.
     let solido_after = context.get_solido().await;
 
-    let validator_after = &solido_after.validators.entries[0].entry;
+    let validator_after = &solido_after.validators.entries[0];
     assert_eq!(
         validator_after.stake_accounts_balance,
         TEST_STAKE_DEPOSIT_AMOUNT
@@ -96,7 +98,7 @@ async fn test_stake_deposit_merge() {
     // We should also have recorded in the Solido state that this validator now
     // has balance in a stake account.
     let solido_after = context.get_solido().await;
-    let validator_after = &solido_after.validators.entries[0].entry;
+    let validator_after = &solido_after.validators.entries[0];
     assert_eq!(
         validator_after.stake_accounts_balance,
         (TEST_STAKE_DEPOSIT_AMOUNT * 2).unwrap(),
@@ -166,7 +168,7 @@ async fn test_stake_deposit_succeeds_despite_donation() {
     context.deposit(TEST_DEPOSIT_AMOUNT).await;
     context
         .stake_deposit(
-            validator.pubkey,
+            *validator.pubkey(),
             StakeDeposit::Append,
             TEST_STAKE_DEPOSIT_AMOUNT,
         )
@@ -174,15 +176,17 @@ async fn test_stake_deposit_succeeds_despite_donation() {
 
     // The state does not record the additional balance yet though.
     let solido = context.get_solido().await;
-    let validator_entry = &solido.validators.entries[0].entry;
+    let validator_entry = &solido.validators.entries[0];
     assert_eq!(
         validator_entry.stake_accounts_balance,
         TEST_STAKE_DEPOSIT_AMOUNT
     );
 
-    context.update_stake_account_balance(validator.pubkey).await;
+    context
+        .update_stake_account_balance(*validator.pubkey())
+        .await;
     let solido = context.get_solido().await;
-    let validator_entry = &solido.validators.entries[0].entry;
+    let validator_entry = &solido.validators.entries[0];
     assert_eq!(
         validator_entry.stake_accounts_balance,
         (TEST_STAKE_DEPOSIT_AMOUNT + Lamports(107_000_000)).unwrap()
@@ -193,6 +197,8 @@ async fn test_stake_deposit_succeeds_despite_donation() {
 async fn test_stake_deposit_fails_for_inactive_validator() {
     let mut context = Context::new_with_maintainer().await;
     let validator = context.add_validator().await;
+    // let one validator be active
+    context.add_validator().await;
 
     context.deactivate_validator(validator.vote_account).await;
 
@@ -223,7 +229,7 @@ async fn test_stake_deposit_fails_if_validator_with_less_stake_exists() {
         .stake_deposit(
             v1.vote_account,
             StakeDeposit::Append,
-            Lamports(1_000_000_000),
+            MINIMUM_STAKE_ACCOUNT_BALANCE,
         )
         .await;
 
@@ -233,7 +239,7 @@ async fn test_stake_deposit_fails_if_validator_with_less_stake_exists() {
         .try_stake_deposit(
             v1.vote_account,
             StakeDeposit::Append,
-            Lamports(1_000_000_000),
+            MINIMUM_STAKE_ACCOUNT_BALANCE,
         )
         .await;
     assert_solido_error!(result, LidoError::ValidatorWithLessStakeExists);
@@ -243,7 +249,7 @@ async fn test_stake_deposit_fails_if_validator_with_less_stake_exists() {
         .stake_deposit(
             v2.vote_account,
             StakeDeposit::Append,
-            Lamports(1_000_000_000),
+            MINIMUM_STAKE_ACCOUNT_BALANCE,
         )
         .await;
 
@@ -252,7 +258,7 @@ async fn test_stake_deposit_fails_if_validator_with_less_stake_exists() {
         .stake_deposit(
             v2.vote_account,
             StakeDeposit::Append,
-            Lamports(1_000_000_000),
+            MINIMUM_STAKE_ACCOUNT_BALANCE,
         )
         .await;
 }

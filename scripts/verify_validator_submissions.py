@@ -32,10 +32,10 @@ from validator_onboarding import Address, ValidatorResponse, iter_rows_from_stdi
 from validator_onboarding import print_ok, print_warn, print_error
 
 
-SOLIDO_AUTHORIZED_WITHDAWER = 'GgrQiJ8s2pfHsfMbEFtNcejnzLegzZ16c9XtJ2X2FpuF'
 ST_SOL_MINT = '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj'
 VOTE_PROGRAM = 'Vote111111111111111111111111111111111111111'
 SPL_TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+MAX_VALIDATION_COMMISSION_PERCENTAGE = 5
 
 
 def solana(*args: str) -> Any:
@@ -58,6 +58,7 @@ def iter_validator_infos() -> Iterable[ValidatorInfo]:
     Return the validator info for all validators on mainnet.
     """
     for info in solana('validator-info', 'get', '--output', 'json'):
+        print(info)
         yield ValidatorInfo(
             identity_address=info['identityPubkey'],
             info_address=info['infoPubkey'],
@@ -85,10 +86,7 @@ def get_token_account(address: Address) -> Optional[TokenAccount]:
     try:
         process = subprocess.run(cmd, check=True, capture_output=True, encoding='utf-8')
         result = json.loads(process.stdout)
-        return TokenAccount(
-            mint_address=result['mint'],
-            state=result['state'],
-        )
+        return TokenAccount(mint_address=result['mint'], state=result['state'])
     except subprocess.CalledProcessError:
         return None
 
@@ -136,6 +134,7 @@ class VoteAccount(NamedTuple):
 
 def get_vote_account(self: ValidatorResponse) -> Optional[VoteAccount]:
     try:
+        print(self.vote_account_address)
         result = solana('vote-account', '--output', 'json', self.vote_account_address)
         return VoteAccount(
             validator_identity_address=result['validatorIdentity'],
@@ -164,22 +163,26 @@ def check_validator_response(
         print_error('Vote account address does not hold a vote account.')
         return
 
-    if vote_account.authorized_withdrawer == SOLIDO_AUTHORIZED_WITHDAWER:
-        print_ok('Authorized withdrawer set to Solido.')
-    else:
-        print_error('Wrong authorized withdrawer.')
-
     if vote_account.num_votes > 0:
         print_ok('Vote account has votes.')
     else:
         print_warn('Vote account has not voted yet.')
 
-    if vote_account.commission == 100:
-        print_ok('Vote account commission is 100%.')
+    if vote_account.commission <= MAX_VALIDATION_COMMISSION_PERCENTAGE:
+        print_ok(
+            'Vote account commission is less than {}%.'.format(
+                MAX_VALIDATION_COMMISSION_PERCENTAGE
+            )
+        )
     else:
-        print_error('Vote account commission is not 100%.')
+        print_error(
+            'Vote account commission is more than {}%.'.format(
+                MAX_VALIDATION_COMMISSION_PERCENTAGE
+            )
+        )
 
     validator_info = validators_by_identity.get(vote_account.validator_identity_address)
+    print(vote_account.validator_identity_address)
     if validator_info is None:
         print_error('Validator identity does not exist.')
         return
@@ -190,16 +193,15 @@ def check_validator_response(
         print_ok('Keybase username in form matches username in identity account.')
     else:
         print_error('Keybase username in identity account does not match the form.')
-
-    if validator_info.name is not None and validator_info.name.startswith('Lido / '):
-        print_ok('Validator identity name starts with "Lido / ".')
-    else:
-        print_error('Validator identity name does not start with "Lido / ".')
+        print(validator_info.keybase_username)
+        print(self.keybase_username)
 
     if validator_info.name == self.identity_name:
         print_ok('Name in identity account matches name in form.')
     else:
         print_error('Name in identity account does not mach name in form.')
+        print(validator_info.name)
+        print(self.identity_name)
 
     if check_keybase_has_identity_address(
         self.keybase_username, vote_account.validator_identity_address
@@ -232,6 +234,7 @@ def check_validator_response(
 
 def main() -> None:
     # Build a map of validators by identity address.
+    print("Build a map of validators by identity address")
     validators_by_identity: Dict[str, ValidatorInfo] = {
         info.identity_address: info for info in iter_validator_infos()
     }
@@ -244,6 +247,7 @@ def main() -> None:
     identity_accounts: Dict[str, str] = {}
     st_sol_accounts: Dict[str, str] = {}
 
+    print("Start verification")
     for response in iter_rows_from_stdin():
         check_validator_response(
             response,

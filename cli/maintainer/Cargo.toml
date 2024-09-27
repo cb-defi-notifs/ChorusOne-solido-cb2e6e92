@@ -4,15 +4,15 @@ description = "Solido Command-line Utility"
 license = "GPL-3.0"
 edition = "2018"
 name = "solido-cli"
-version = "1.3.3"
+default-run = "solido"
+version = "1.3.6"
 
 [dependencies]
 anchor-lang = "0.13.0"
-anker = { path = "../../anker", features = ["no-entrypoint"] }
 bincode = "1.3"
 borsh = "0.9"
 bs58 = "0.4.0"
-clap = { version = "3.1.18", features = ["derive"] }
+clap = { version = "3.2.15", features = ["derive"] }
 derivation-path = "0.1.3"
 lido = {path = "../../program", features = ["no-entrypoint"]}
 num-traits = "0.2"
